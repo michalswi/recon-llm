@@ -13,5 +13,5 @@ recon
 `
 
 func ShowBanner() {
-	fmt.Printf("%s", color.Format(color.BLUE, banner))
+	fmt.Printf("%s", color.Format(color.GREEN, banner))
 }
