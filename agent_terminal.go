@@ -33,7 +33,7 @@ func main() {
 	startTime = time.Now()
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println(info("Enter an objective to start an agent run."))
-	fmt.Println(info("Use /agent for the structured goal form or /h for help."))
+	fmt.Println(info("Use /agent for the structured goal form or /h for help.\n"))
 
 	for {
 		fmt.Print(accent("Goal: "))
