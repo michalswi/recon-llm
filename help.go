@@ -1,0 +1,107 @@
+package main
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+func printHelp() {
+	fmt.Println(accent("Agent commands:"))
+	fmt.Println("  <objective>    Start an agent run with a quick objective")
+	fmt.Println("  /agent [GOAL]  Collect expected output, constraints, completion criteria, and attachment")
+	fmt.Println("  /h, /help      Show this help")
+	fmt.Println("  /q             Exit; Ctrl+C cancels an active run")
+	fmt.Println("  /dir           Show current working directory")
+	fmt.Println("  /m             Show the Ollama model")
+	fmt.Println("  /up            Show app uptime")
+	fmt.Println("  /sysprompt     Show the agent base prompt")
+	fmt.Println("  /editsysprompt Select or enter an agent base prompt")
+	fmt.Println("  /think-on      Enable model reasoning")
+	fmt.Println("  /think-off     Disable model reasoning")
+	fmt.Println(accent("Agent tool allowlist:"))
+	fmt.Printf("  [%s]\n", strings.Join(allowedCommandsList(), ", "))
+}
+
+func printSystemPrompt() {
+	fmt.Println(accent("Current agent base prompt:"))
+	fmt.Println(systemPrompt)
+}
+
+func handleEditSystemPrompt() {
+	files, _ := os.ReadDir("prompts")
+	var promptFiles []string
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") && file.Name() != "agent.txt" {
+			promptFiles = append(promptFiles, file.Name())
+		}
+	}
+	sort.Strings(promptFiles)
+
+	fmt.Println(accent("Available base prompts:"))
+	for index, name := range promptFiles {
+		fmt.Printf("  %d. %s\n", index+1, name)
+	}
+	fmt.Println("  custom: enter a custom base prompt")
+	fmt.Println("  cancel: keep the current prompt")
+
+	reader := bufio.NewReader(os.Stdin)
+	choice, err := promptLine(reader, "Choose option: ")
+	if err != nil || strings.EqualFold(choice, "cancel") {
+		return
+	}
+	if strings.EqualFold(choice, "custom") {
+		fmt.Println(info("Enter the prompt; finish with a line containing only EOF."))
+		customPrompt, err := readUntilDelimiter(reader, "EOF")
+		if err != nil {
+			fmt.Println(warn("Read error:"), err)
+			return
+		}
+		customPrompt = strings.TrimSpace(customPrompt)
+		if customPrompt == "" {
+			fmt.Println(warn("Prompt cannot be empty."))
+			return
+		}
+		systemPrompt = customPrompt
+		systemPromptName = "custom"
+		return
+	}
+
+	index, err := strconv.Atoi(choice)
+	if err != nil || index < 1 || index > len(promptFiles) {
+		fmt.Println(warn("Invalid selection."))
+		return
+	}
+	name := promptFiles[index-1]
+	data, err := os.ReadFile(filepath.Join("prompts", name))
+	if err != nil {
+		fmt.Println(warn("Read error:"), err)
+		return
+	}
+	systemPrompt = string(data)
+	systemPromptName = name
+	fmt.Println(success("Agent base prompt selected: " + name))
+}
+
+func readUntilDelimiter(reader *bufio.Reader, delimiter string) (string, error) {
+	var content strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		if strings.TrimRight(line, "\r\n") == delimiter {
+			return content.String(), nil
+		}
+		content.WriteString(line)
+		if errors.Is(err, io.EOF) {
+			return content.String(), nil
+		}
+	}
+}
