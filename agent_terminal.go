@@ -40,6 +40,7 @@ var terminalAttachmentPaths []string
 
 func main() {
 	checkOllamaFlag := flag.Bool("check-ollama", false, "check whether the configured Ollama server is reachable, then exit")
+	checkOllamaPSFlag := flag.Bool("check-ollama-ps", false, "show models currently loaded in Ollama (/api/ps), then exit")
 	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
 	flag.Parse()
 
@@ -47,6 +48,18 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		message, err := checkOllamaReachable(ctx, ollamaURL)
+		if err != nil {
+			fmt.Println(warn("Ollama unreachable:"), err)
+			os.Exit(1)
+		}
+		fmt.Println(success(message))
+		return
+	}
+
+	if *checkOllamaPSFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		message, err := checkOllamaPS(ctx, ollamaURL)
 		if err != nil {
 			fmt.Println(warn("Ollama unreachable:"), err)
 			os.Exit(1)
@@ -135,6 +148,15 @@ func handleAgentCLICommand(input string) bool {
 		} else {
 			fmt.Println(success(message))
 		}
+	case "/ollama-ps":
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		message, err := checkOllamaPS(ctx, ollamaURL)
+		cancel()
+		if err != nil {
+			fmt.Println(warn("Ollama unreachable:"), err)
+		} else {
+			fmt.Println(success(message))
+		}
 	case "/attach":
 		path := strings.TrimSpace(input[len(parts[0]):])
 		paths, err := resolveAttachmentPaths(path)
@@ -149,6 +171,15 @@ func handleAgentCLICommand(input string) bool {
 		}
 		terminalAttachmentPaths = updated
 		fmt.Printf("%s %d file(s) attached for subsequent runs.\n", success("Attached:"), len(terminalAttachmentPaths))
+	case "/attached":
+		if len(terminalAttachmentPaths) == 0 {
+			fmt.Println(info("No persistent attachments."))
+			break
+		}
+		fmt.Println(accent("Attached files:"))
+		for _, path := range terminalAttachmentPaths {
+			fmt.Println("  " + path)
+		}
 	case "/deattach", "/detach":
 		terminalAttachmentPaths = nil
 		fmt.Println(info("Persistent attachments cleared."))

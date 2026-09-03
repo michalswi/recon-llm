@@ -354,6 +354,49 @@ func checkOllamaReachable(ctx context.Context, chatURL string) (string, error) {
 	return fmt.Sprintf("Ollama reachable at %s (%d model(s) available)", tagsURL, len(payload.Models)), nil
 }
 
+// checkOllamaPS queries Ollama's /api/ps endpoint to list currently loaded models.
+func checkOllamaPS(ctx context.Context, chatURL string) (string, error) {
+	parsed, err := url.Parse(chatURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid OLLAMA_URL %q", chatURL)
+	}
+	psURL := fmt.Sprintf("%s://%s/api/ps", parsed.Scheme, parsed.Host)
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, psURL, nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("could not reach %s: %w", psURL, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("%s returned %s", psURL, response.Status)
+	}
+
+	var payload struct {
+		Models []struct {
+			Name      string `json:"name"`
+			Size      int64  `json:"size"`
+			SizeVRAM  int64  `json:"size_vram"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("unexpected response from %s: %w", psURL, err)
+	}
+	if len(payload.Models) == 0 {
+		return "No models currently loaded in Ollama.", nil
+	}
+	var lines strings.Builder
+	fmt.Fprintf(&lines, "%d model(s) loaded in Ollama:", len(payload.Models))
+	for _, model := range payload.Models {
+		fmt.Fprintf(&lines, "\n  %s: size=%d size_vram=%d expires_at=%s", model.Name, model.Size, model.SizeVRAM, model.ExpiresAt)
+	}
+	return lines.String(), nil
+}
+
 func sanitizeCommand(command string) string {
 	command = strings.TrimSpace(command)
 	command = strings.Trim(command, "`")
