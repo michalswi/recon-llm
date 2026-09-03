@@ -400,11 +400,12 @@ func formatUptime() string {
 	return time.Since(startTime).Round(time.Second).String()
 }
 
-func accent(text string) string  { return color.Format(color.WHITE, text) }
-func info(text string) string    { return color.Format(color.GREEN, text) }
-func success(text string) string { return color.Format(color.GREEN, text) }
-func warn(text string) string    { return color.Format(color.RED, text) }
-func assistantLabel() string     { return color.Format(color.GREEN, "Assistant:") }
-func runningLabel() string       { return color.Format(color.GREEN, "[Running]:") }
-func outputLabel() string        { return color.Format(color.GREEN, "[Command output]:") }
-func separatorLine() string      { return color.Format(color.MINGLE, separator) }
+func accent(text string) string    { return color.Format(color.WHITE, text) }
+func info(text string) string      { return color.Format(color.GREEN, text) }
+func success(text string) string   { return color.Format(color.GREEN, text) }
+func warn(text string) string      { return color.Format(color.RED, text) }
+func goalLabel(text string) string { return color.Format(color.BLUE, text) }
+func assistantLabel() string       { return color.Format(color.GREEN, "Assistant:") }
+func runningLabel() string         { return color.Format(color.GREEN, "[Running]:") }
+func outputLabel() string          { return color.Format(color.GREEN, "[Command output]:") }
+func separatorLine() string        { return color.Format(color.MINGLE, separator) }

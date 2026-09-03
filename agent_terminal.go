@@ -60,7 +60,7 @@ func main() {
 	fmt.Println(info("Use /agent for the structured goal form or /h for help.\n"))
 
 	for {
-		fmt.Print(accent("Goal: "))
+		fmt.Print(goalLabel("Goal: "))
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
 			fmt.Println(warn("Read error:"), err)
@@ -342,8 +342,23 @@ func printAgentEvent(event AgentEvent) {
 	case "verification":
 		fmt.Println(info("Critic requested revision:"), event.Text)
 	case "error", "invalid_action":
-		fmt.Println(warn("Agent error:"), event.Text)
+		fmt.Println(warn("Agent error:"), formatAgentDisplayText(event.Text))
 	}
+}
+
+const maxAgentDisplayTextLength = 2000
+
+// formatAgentDisplayText renders raw, possibly-undecoded model text for the terminal only;
+// persisted events keep the original, unmodified text.
+func formatAgentDisplayText(text string) string {
+	text = strings.ReplaceAll(text, "\\r\\n", "\n")
+	text = strings.ReplaceAll(text, "\\n", "\n")
+	text = strings.ReplaceAll(text, "\\t", "\t")
+	text = strings.ReplaceAll(text, "\r", "")
+	if len(text) > maxAgentDisplayTextLength {
+		text = text[:maxAgentDisplayTextLength] + "\n... (truncated for display)"
+	}
+	return strings.TrimSpace(text)
 }
 
 func promptLine(reader *bufio.Reader, label string) (string, error) {

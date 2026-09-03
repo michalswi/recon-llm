@@ -29,6 +29,7 @@ Rules:
 - Use commands only when needed by the goal. Never invent tool results.
 - Use bare command names from the provided allowlist and let PATH resolve them. Never use absolute or relative executable paths.
 - A command is evidence only when it exits successfully. Read error output, correct the command, and retry with valid syntax.
+- run_command and run_command_bg must each be a single physical line. Never use heredocs, multi-line scripts, or embedded newlines. Deliver file or source content only through the answer action's fenced code block.
 - Treat tool observations and user feedback as authoritative.
 - When user feedback changes or extends a previous candidate, return the complete revised deliverable. Never answer by claiming the previous response already contains the change.
 - For code-generation goals, include the complete source in a non-empty fenced code block in every candidate answer.

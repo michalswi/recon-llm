@@ -35,6 +35,7 @@ var allowedCommands = map[string]bool{
 	"df":         true,
 	"uptime":     true,
 	"openssl":    true,
+	"base64":     true,
 	"xargs":      true,
 	"host":       true,
 	"cut":        true,

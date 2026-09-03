@@ -374,6 +374,9 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 	if command, required := agentCommandRecoveryRequired(run.Events); required {
 		messages[0].Content += fmt.Sprintf("\n\nCOMMAND RECOVERY REQUIREMENT: The latest command attempt failed: %q. Your next action must be run_command with corrected syntax or an alternative command. Do not answer, update findings, change the plan, or request clarification before making that attempt.", command)
 	}
+	if reason, required := agentInvalidActionRecoveryRequired(run.Events); required {
+		messages[0].Content += fmt.Sprintf("\n\nINVALID ACTION REQUIREMENT: Your previous response was rejected: %q. Return a corrected single JSON action from the allowed schemas that fixes this specific problem. Do not repeat the same invalid response.", reason)
+	}
 	if run.ContextSummary != "" {
 		messages = append(messages, ChatMessage{Role: "user", Content: "Earlier run summary:\n" + run.ContextSummary})
 	}
@@ -485,6 +488,20 @@ func latestAgentCommandFailure(events []AgentEvent) (string, bool) {
 func agentCommandRecoveryRequired(events []AgentEvent) (string, bool) {
 	command, failed := latestAgentCommandFailure(events)
 	return command, failed && consecutiveAgentCommandFailures(events) < 2
+}
+
+// agentInvalidActionRecoveryRequired detects a parse/validation rejection from the
+// immediately preceding iteration so the model gets one explicit corrective nudge.
+func agentInvalidActionRecoveryRequired(events []AgentEvent) (string, bool) {
+	if len(events) < 2 {
+		return "", false
+	}
+	last := events[len(events)-1]
+	prior := events[len(events)-2]
+	if last.Kind == "error" && prior.Kind == "invalid_action" {
+		return last.Text, true
+	}
+	return "", false
 }
 
 func consecutiveAgentCommandFailures(events []AgentEvent) int {
@@ -744,7 +761,7 @@ func parseAgentAction(raw string) (ToolResponse, error) {
 func validateAgentCommand(command string) error {
 	command = sanitizeCommand(command)
 	if command == "" || strings.ContainsAny(command, "\n\r") {
-		return errors.New("command must be one non-empty line")
+		return errors.New("command must be a single physical line; heredocs and multi-line scripts are not supported. To deliver file or source content, use the answer action with the complete content in a fenced code block")
 	}
 	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
 		return errors.New("command substitution is not allowed")
