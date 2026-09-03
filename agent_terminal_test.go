@@ -55,3 +55,15 @@ func TestNewTerminalAgentSessionPersistsRun(t *testing.T) {
 		t.Fatalf("persisted run snapshot missing: %v", err)
 	}
 }
+
+func TestComposeAgentPromptWithoutPromptDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	prompt, err := composeAgentPrompt("base", "test goal", "test history")
+	if err != nil {
+		t.Fatalf("composeAgentPrompt returned error: %v", err)
+	}
+	if !strings.Contains(prompt, "test goal") || !strings.Contains(prompt, "test history") {
+		t.Fatalf("composed prompt does not contain substitutions: %q", prompt)
+	}
+}

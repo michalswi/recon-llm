@@ -15,7 +15,7 @@ make build
 ./recon
 ```
 
-Keep `prompts/` beside the binary because `prompts/agent.txt` is a runtime dependency.
+All bundled prompts are embedded in the binary, so the executable can run from any directory. `SYSTEM_PROMPT` may still point to an external base-prompt file.
 
 Check that Ollama is reachable at any time with:
 

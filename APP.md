@@ -18,8 +18,8 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `help.go`: terminal help and system-prompt selection.
 - `fileextract.go`: local document and packet-capture extraction utilities.
 - `vars.go`: version, built-in prompt, environment configuration, and process state.
-- `prompts/agent.txt`: strict agent action protocol.
-- `prompts/*.txt`: optional base prompts.
+- `prompts/agent.txt`: strict agent action protocol embedded at build time.
+- `prompts/*.txt`: base prompts embedded at build time.
 
 ## Runtime Configuration
 
@@ -40,7 +40,7 @@ The application sends non-streaming chat requests. Agent calls set `format: "jso
 
 Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, and optional attachment path.
 
-The selected system prompt is captured as the immutable base prompt for each run and combined with `prompts/agent.txt`. An attachment remains at its existing local path; recon records its metadata and tells the agent where allowed command-line tools can inspect it.
+The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path; recon records its metadata and tells the agent where allowed command-line tools can inspect it.
 
 The worker runs synchronously while emitting plans, commands, observations, errors, and verification feedback to the terminal. Ctrl+C cancels the active context and run-owned jobs. The worker pauses in:
 
@@ -103,7 +103,7 @@ Do not claim the allowlist is a security boundary. Use recon only in a trusted e
 - The application is agent-only, with terminal and opt-in headless API interfaces.
 - Preserve the worker-owned loop, planning, critic, retries, context compaction, evidence, jobs, attachments, clarification, revision, approval, cancellation, and limits.
 - Keep agent actions strict and machine-readable.
-- Keep prompt files as runtime filesystem dependencies.
+- Keep bundled prompts embedded so the binary remains standalone.
 - Keep run snapshots compatible when practical.
 - Do not add a Web UI without an explicit product change.
 

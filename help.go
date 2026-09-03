@@ -36,7 +36,7 @@ func printSystemPrompt() {
 }
 
 func handleEditSystemPrompt() {
-	files, _ := os.ReadDir("prompts")
+	files, _ := embeddedPrompts.ReadDir("prompts")
 	var promptFiles []string
 	for _, file := range files {
 		if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") && file.Name() != "agent.txt" {
@@ -80,7 +80,7 @@ func handleEditSystemPrompt() {
 		return
 	}
 	name := promptFiles[index-1]
-	data, err := os.ReadFile(filepath.Join("prompts", name))
+	data, err := embeddedPrompts.ReadFile(filepath.Join("prompts", name))
 	if err != nil {
 		fmt.Println(warn("Read error:"), err)
 		return

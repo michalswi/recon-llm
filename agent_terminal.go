@@ -371,7 +371,7 @@ func promptLine(reader *bufio.Reader, label string) (string, error) {
 }
 
 func composeAgentPrompt(basePrompt, goal, history string) (string, error) {
-	data, err := os.ReadFile("prompts/agent.txt")
+	data, err := embeddedPrompts.ReadFile("prompts/agent.txt")
 	if err != nil {
 		return "", err
 	}

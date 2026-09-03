@@ -59,6 +59,5 @@ RUN adduser -D -h /app app
 USER app
 WORKDIR /app
 
-COPY --from=builder /dummy/prompts ./prompts
 COPY --from=builder /dummy/${APP_NAME}-${APP_VERSION} ./${APP_NAME}
 CMD ["./recon"]
