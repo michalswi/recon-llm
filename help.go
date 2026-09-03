@@ -22,6 +22,8 @@ func printHelp() {
 	fmt.Println("  /m             Show the Ollama model")
 	fmt.Println("  /up            Show app uptime")
 	fmt.Println("  /ollama        Check whether the Ollama server is reachable")
+	fmt.Println("  /attach PATH   Attach a file or directory for subsequent runs")
+	fmt.Println("  /deattach      Clear persistent attachments (/detach also works)")
 	fmt.Println("  /sysprompt     Show the agent base prompt")
 	fmt.Println("  /editsysprompt Select or enter an agent base prompt")
 	fmt.Println("  /think-on      Enable model reasoning")

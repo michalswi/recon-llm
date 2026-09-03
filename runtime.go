@@ -100,6 +100,8 @@ type agentSession struct {
 	PartialFindings    string
 	AttachedFile       *FileAttachment
 	AttachedFilePath   string
+	AttachedFiles      []*FileAttachment
+	AttachedFilePaths  []string
 	ThinkingEnabled    bool
 	AwaitingDecision   bool
 	AgentStart         int

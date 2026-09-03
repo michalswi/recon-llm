@@ -40,7 +40,7 @@ The application sends non-streaming chat requests. Agent calls set `format: "jso
 
 Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, and optional attachment path.
 
-The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path; recon records its metadata and tells the agent where allowed command-line tools can inspect it.
+The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path. Supported image attachments are base64-encoded into Ollama messages for worker and critic vision analysis; other files are exposed by path for allowed command-line tools. A plain objective can infer an existing absolute image path, while `/agent` and the API accept explicit attachment paths. `/attach` persists a file or directory's regular files across subsequent terminal runs until `/deattach` or `/detach`; at most 16 files are attached per run.
 
 The worker runs synchronously while emitting plans, commands, observations, errors, and verification feedback to the terminal. Ctrl+C cancels the active context and run-owned jobs. The worker pauses in:
 

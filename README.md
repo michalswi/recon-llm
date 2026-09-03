@@ -36,7 +36,9 @@ This exits `0` and prints the reachable URL and model count, or exits `1` with t
 
 ## Terminal Workflow
 
-Enter an objective directly to start a run. Use `/agent [GOAL]` for the structured form, which also accepts expected output, constraints, completion criteria, and an optional local attachment path.
+Enter an objective directly to start a run. An existing absolute `.jpg`, `.jpeg`, `.png`, or `.webp` path in the objective is attached directly to Ollama for visual analysis. Image analysis requires a vision-capable model.
+
+Use `/attach PATH` to attach a file or the regular files in a directory to every subsequent run in the current terminal process. Up to 16 files can be active. Run `/deattach` or `/detach` to clear them. Use `/agent [GOAL]` for the structured form, which also accepts expected output, constraints, completion criteria, and a one-run attachment path.
 
 The agent prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
 

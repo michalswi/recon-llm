@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,12 +23,20 @@ type FileAttachment struct {
 }
 
 type AgentRequest struct {
-	Goal               string `json:"goal"`
-	ExpectedOutput     string `json:"expectedOutput,omitempty"`
-	Constraints        string `json:"constraints,omitempty"`
-	CompletionCriteria string `json:"completionCriteria,omitempty"`
-	FilePath           string `json:"filePath,omitempty"`
+	Goal               string   `json:"goal"`
+	ExpectedOutput     string   `json:"expectedOutput,omitempty"`
+	Constraints        string   `json:"constraints,omitempty"`
+	CompletionCriteria string   `json:"completionCriteria,omitempty"`
+	FilePath           string   `json:"filePath,omitempty"`
+	FilePaths          []string `json:"filePaths,omitempty"`
 }
+
+const (
+	maxAgentAttachments = 16
+	maxAgentImageSize   = 20 << 20
+)
+
+var terminalAttachmentPaths []string
 
 func main() {
 	checkOllamaFlag := flag.Bool("check-ollama", false, "check whether the configured Ollama server is reachable, then exit")
@@ -94,6 +103,7 @@ func main() {
 			fmt.Println(warn("Input error:"), err)
 			continue
 		}
+		request.FilePaths = append(request.FilePaths, terminalAttachmentPaths...)
 		if err := runTerminalAgent(reader, request); err != nil {
 			fmt.Println(warn("Agent run failed:"), err)
 		}
@@ -125,6 +135,23 @@ func handleAgentCLICommand(input string) bool {
 		} else {
 			fmt.Println(success(message))
 		}
+	case "/attach":
+		path := strings.TrimSpace(input[len(parts[0]):])
+		paths, err := resolveAttachmentPaths(path)
+		if err != nil {
+			fmt.Println(warn("Attachment error:"), err)
+			break
+		}
+		updated := appendUniquePaths(append([]string(nil), terminalAttachmentPaths...), paths...)
+		if len(updated) > maxAgentAttachments {
+			fmt.Printf("%s maximum is %d files.\n", warn("Attachment error:"), maxAgentAttachments)
+			break
+		}
+		terminalAttachmentPaths = updated
+		fmt.Printf("%s %d file(s) attached for subsequent runs.\n", success("Attached:"), len(terminalAttachmentPaths))
+	case "/deattach", "/detach":
+		terminalAttachmentPaths = nil
+		fmt.Println(info("Persistent attachments cleared."))
 	case "/sysprompt":
 		printSystemPrompt()
 	case "/editsysprompt":
@@ -258,6 +285,19 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	if request.Goal == "" {
 		return nil, errors.New("objective is required")
 	}
+	attachmentPaths := append([]string(nil), request.FilePaths...)
+	if strings.TrimSpace(request.FilePath) != "" {
+		attachmentPaths = append(attachmentPaths, request.FilePath)
+	}
+	if len(attachmentPaths) == 0 {
+		if path := imagePathFromGoal(request.Goal); path != "" {
+			attachmentPaths = append(attachmentPaths, path)
+		}
+	}
+	attachmentPaths = appendUniquePaths(nil, attachmentPaths...)
+	if len(attachmentPaths) > maxAgentAttachments {
+		return nil, fmt.Errorf("more than %d attachment paths provided", maxAgentAttachments)
+	}
 
 	sessionID := fmt.Sprintf("run_%d", time.Now().UnixNano())
 	sess := &agentSession{
@@ -273,22 +313,49 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	sess.eventSink = printAgentEvent
 
 	goalDescription := request.Goal
-	if strings.TrimSpace(request.FilePath) != "" {
-		absolutePath, err := filepath.Abs(strings.TrimSpace(request.FilePath))
+	resolvedAttachments := make(map[string]bool)
+	for _, attachmentPath := range attachmentPaths {
+		paths, err := resolveAttachmentPaths(attachmentPath)
 		if err != nil {
-			return nil, fmt.Errorf("resolve attachment path: %w", err)
+			return nil, err
 		}
-		fileInfo, err := os.Stat(absolutePath)
-		if err != nil {
-			return nil, fmt.Errorf("open attachment: %w", err)
+		for _, absolutePath := range paths {
+			if resolvedAttachments[absolutePath] {
+				continue
+			}
+			if len(resolvedAttachments) >= maxAgentAttachments {
+				return nil, fmt.Errorf("more than %d files resolved from attachment paths", maxAgentAttachments)
+			}
+			resolvedAttachments[absolutePath] = true
+			fileInfo, err := os.Stat(absolutePath)
+			if err != nil {
+				return nil, fmt.Errorf("open attachment: %w", err)
+			}
+			attachment := &FileAttachment{Name: fileInfo.Name(), Size: fileInfo.Size()}
+			if isSupportedImagePath(absolutePath) {
+				if fileInfo.Size() > maxAgentImageSize {
+					return nil, fmt.Errorf("image attachment exceeds %d MiB limit", maxAgentImageSize>>20)
+				}
+				data, err := os.ReadFile(absolutePath)
+				if err != nil {
+					return nil, fmt.Errorf("read image attachment: %w", err)
+				}
+				attachment.Type = "image"
+				attachment.Content = base64.StdEncoding.EncodeToString(data)
+			}
+			if sess.AttachedFile == nil {
+				sess.AttachedFile = attachment
+				sess.AttachedFilePath = absolutePath
+			}
+			sess.AttachedFiles = append(sess.AttachedFiles, attachment)
+			sess.AttachedFilePaths = append(sess.AttachedFilePaths, absolutePath)
+			goalDescription += fmt.Sprintf("\n\nFILE AVAILABLE: %s (%d bytes) at path: %s", fileInfo.Name(), fileInfo.Size(), absolutePath)
+			if attachment.Type == "image" {
+				goalDescription += "\nThe image is attached directly to the model message for visual analysis."
+			} else {
+				goalDescription += "\nUse the allowed command-line tools to inspect this file when needed."
+			}
 		}
-		if !fileInfo.Mode().IsRegular() {
-			return nil, errors.New("attachment must be a regular file")
-		}
-		sess.AttachedFile = &FileAttachment{Name: fileInfo.Name(), Size: fileInfo.Size()}
-		sess.AttachedFilePath = absolutePath
-		goalDescription += fmt.Sprintf("\n\nFILE AVAILABLE: %s (%d bytes) at path: %s", fileInfo.Name(), fileInfo.Size(), absolutePath)
-		goalDescription += "\nUse the allowed command-line tools to inspect this file when needed."
 	}
 
 	if _, err := composeAgentPrompt(systemPrompt, goalDescription, "No previous attempts yet."); err != nil {
@@ -306,6 +373,79 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		return nil, err
 	}
 	return sess, nil
+}
+
+func imagePathFromGoal(goal string) string {
+	for _, field := range strings.Fields(goal) {
+		candidate := strings.Trim(field, "\"'(),.;:[]{}")
+		if filepath.IsAbs(candidate) && isSupportedImagePath(candidate) {
+			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func isSupportedImagePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveAttachmentPaths(path string) ([]string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("path is required")
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve attachment path: %w", err)
+	}
+	info, err := os.Stat(absolutePath)
+	if err != nil {
+		return nil, fmt.Errorf("open attachment: %w", err)
+	}
+	if info.Mode().IsRegular() {
+		return []string{absolutePath}, nil
+	}
+	if !info.IsDir() {
+		return nil, errors.New("attachment must be a regular file or directory")
+	}
+	entries, err := os.ReadDir(absolutePath)
+	if err != nil {
+		return nil, fmt.Errorf("read attachment directory: %w", err)
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			paths = append(paths, filepath.Join(absolutePath, entry.Name()))
+		}
+	}
+	if len(paths) == 0 {
+		return nil, errors.New("attachment directory contains no regular files")
+	}
+	if len(paths) > maxAgentAttachments {
+		return nil, fmt.Errorf("attachment directory contains more than %d regular files", maxAgentAttachments)
+	}
+	return paths, nil
+}
+
+func appendUniquePaths(existing []string, paths ...string) []string {
+	seen := make(map[string]bool, len(existing)+len(paths))
+	for _, path := range existing {
+		seen[path] = true
+	}
+	for _, path := range paths {
+		if path != "" && !seen[path] {
+			existing = append(existing, path)
+			seen[path] = true
+		}
+	}
+	return existing
 }
 
 func resumeAgent(sess *agentSession, feedback string) {

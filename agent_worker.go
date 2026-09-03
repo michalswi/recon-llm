@@ -410,13 +410,35 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 	} else {
 		messages = append(messages, ChatMessage{Role: "user", Content: "Choose the next action. If the goal is complete, return answer."})
 	}
+	if images := agentImages(sess); len(images) > 0 {
+		messages[len(messages)-1].Images = images
+	}
 	return messages, nil
 }
 
+func agentImages(sess *agentSession) []string {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	images := make([]string, 0, len(sess.AttachedFiles))
+	for _, attachment := range sess.AttachedFiles {
+		if attachment != nil && attachment.Type == "image" {
+			images = append(images, attachment.Content)
+		}
+	}
+	return images
+}
+
 func requiredGoalCommand(run *AgentRun) string {
-	for _, field := range agentGoalFields(run.Goal) {
-		if allowedCommands[field] {
-			return field
+	fields := agentGoalFields(run.GoalSpec.Objective)
+	if len(fields) == 0 {
+		return ""
+	}
+	if allowedCommands[fields[0]] {
+		return fields[0]
+	}
+	for index := 0; index+1 < len(fields); index++ {
+		if (fields[index] == "run" || fields[index] == "execute") && allowedCommands[fields[index+1]] {
+			return fields[index+1]
 		}
 	}
 	return ""
@@ -634,7 +656,7 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 	revisionContext := agentRevisionContext(run)
 	messages := []ChatMessage{
 		{Role: "system", Content: "You are an independent critic. Verify the exact candidate agent-agent answer against the objective, expected output, constraints, completion criteria, plan, user feedback, and recorded events. Approve only if the candidate itself contains the complete requested deliverable. Never assume promised, described, or omitted content exists; a preamble without its claimed output is incomplete. Return exactly one JSON object: {\"approved\":true|false,\"feedback\":\"specific reason or empty\",\"evidenceEventIds\":[1,2]}. Cite only event IDs that directly support the answer. Knowledge-only answers may use an empty evidence list."},
-		{Role: "user", Content: agentGoalDescription(run) + "\n\nREVISION CONTEXT:\n" + revisionContext + "\n\nPLAN:\n" + string(planJSON) + "\n\nCANDIDATE ANSWER:\n" + candidate + "\n\nRECORDED EVENTS:\n" + string(evidenceJSON)},
+		{Role: "user", Content: agentGoalDescription(run) + "\n\nREVISION CONTEXT:\n" + revisionContext + "\n\nPLAN:\n" + string(planJSON) + "\n\nCANDIDATE ANSWER:\n" + candidate + "\n\nRECORDED EVENTS:\n" + string(evidenceJSON), Images: agentImages(sess)},
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
 	response, err := callOllamaMessageWithLogContext(verifyCtx, "agent-critic:"+run.ID, messages, true, false)
@@ -967,6 +989,8 @@ func cleanupAgentRunResources(sess *agentSession) {
 	attachmentPath := sess.AttachedFilePath
 	sess.AttachedFile = nil
 	sess.AttachedFilePath = ""
+	sess.AttachedFiles = nil
+	sess.AttachedFilePaths = nil
 	sess.AgentStart = 0
 	sess.AwaitingDecision = false
 	sess.mu.Unlock()
