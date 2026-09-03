@@ -10,27 +10,35 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 )
 
 func printHelp() {
 	fmt.Println(accent("Agent commands:"))
-	fmt.Println("  <objective>    Start an agent run with a quick objective")
-	fmt.Println("  /agent [GOAL]  Collect expected output, constraints, completion criteria, and attachment")
-	fmt.Println("  /h, /help      Show this help")
-	fmt.Println("  /q             Exit; Ctrl+C cancels an active run")
-	fmt.Println("  /dir           Show current working directory")
-	fmt.Println("  /m             Show the Ollama model")
-	fmt.Println("  /up            Show app uptime")
-	fmt.Println("  /ollama        Check whether the Ollama server is reachable")
-	fmt.Println("  /ollama-ps     Show models currently loaded in Ollama")
-	fmt.Println("  /ollama-models Show models available in Ollama")
-	fmt.Println("  /attach PATH   Attach a file or directory for subsequent runs")
-	fmt.Println("  /attached      List currently attached files")
-	fmt.Println("  /deattach [PATH] Clear all persistent attachments, or just PATH (/detach also works)")
-	fmt.Println("  /sysprompt     Show the agent base prompt")
-	fmt.Println("  /editsysprompt Select or enter an agent base prompt")
-	fmt.Println("  /think-on      Enable model reasoning")
-	fmt.Println("  /think-off     Disable model reasoning")
+	commands := [][2]string{
+		{"<objective>", "Start an agent run with a quick objective"},
+		{"/agent [GOAL]", "Collect expected output, constraints, completion criteria, and attachment"},
+		{"/h, /help", "Show this help"},
+		{"/q", "Exit; Ctrl+C cancels an active run"},
+		{"/dir", "Show current working directory"},
+		{"/m", "Show the Ollama model"},
+		{"/up", "Show app uptime"},
+		{"/ollama", "Check whether the Ollama server is reachable"},
+		{"/ollama-ps", "Show models currently loaded in Ollama"},
+		{"/ollama-models", "Show models available in Ollama"},
+		{"/attach PATH", "Attach a file or directory for subsequent runs"},
+		{"/attached", "List currently attached files"},
+		{"/deattach [PATH]", "Clear all persistent attachments, or just PATH (/detach also works)"},
+		{"/sysprompt", "Show the agent base prompt"},
+		{"/editsysprompt", "Select or enter an agent base prompt"},
+		{"/think-on", "Enable model reasoning"},
+		{"/think-off", "Disable model reasoning"},
+	}
+	writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	for _, command := range commands {
+		fmt.Fprintf(writer, "  %s\t%s\n", command[0], command[1])
+	}
+	writer.Flush()
 	fmt.Println(accent("Agent tool allowlist:"))
 	fmt.Printf("  [%s]\n", strings.Join(allowedCommandsList(), ", "))
 }
