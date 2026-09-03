@@ -26,7 +26,7 @@ func printHelp() {
 	fmt.Println("  /ollama-models Show models available in Ollama")
 	fmt.Println("  /attach PATH   Attach a file or directory for subsequent runs")
 	fmt.Println("  /attached      List currently attached files")
-	fmt.Println("  /deattach      Clear persistent attachments (/detach also works)")
+	fmt.Println("  /deattach [PATH] Clear all persistent attachments, or just PATH (/detach also works)")
 	fmt.Println("  /sysprompt     Show the agent base prompt")
 	fmt.Println("  /editsysprompt Select or enter an agent base prompt")
 	fmt.Println("  /think-on      Enable model reasoning")

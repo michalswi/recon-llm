@@ -203,8 +203,32 @@ func handleAgentCLICommand(input string) bool {
 			fmt.Println("  " + path)
 		}
 	case "/deattach", "/detach":
-		terminalAttachmentPaths = nil
-		fmt.Println(info("Persistent attachments cleared."))
+		argument := strings.TrimSpace(input[len(parts[0]):])
+		if argument == "" {
+			terminalAttachmentPaths = nil
+			fmt.Println(info("Persistent attachments cleared."))
+			break
+		}
+		absolutePath, err := filepath.Abs(argument)
+		if err != nil {
+			fmt.Println(warn("Attachment error:"), err)
+			break
+		}
+		updated := make([]string, 0, len(terminalAttachmentPaths))
+		removed := false
+		for _, path := range terminalAttachmentPaths {
+			if path == absolutePath {
+				removed = true
+				continue
+			}
+			updated = append(updated, path)
+		}
+		if !removed {
+			fmt.Printf("%s %q is not attached.\n", warn("Attachment error:"), absolutePath)
+			break
+		}
+		terminalAttachmentPaths = updated
+		fmt.Printf("%s %d file(s) remain attached.\n", info("Detached:"), len(terminalAttachmentPaths))
 	case "/sysprompt":
 		printSystemPrompt()
 	case "/editsysprompt":
@@ -366,6 +390,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	sess.eventSink = printAgentEvent
 
 	goalDescription := request.Goal
+	var attachmentNote strings.Builder
 	resolvedAttachments := make(map[string]bool)
 	for _, attachmentPath := range attachmentPaths {
 		paths, err := resolveAttachmentPaths(attachmentPath)
@@ -402,11 +427,11 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 			}
 			sess.AttachedFiles = append(sess.AttachedFiles, attachment)
 			sess.AttachedFilePaths = append(sess.AttachedFilePaths, absolutePath)
-			goalDescription += fmt.Sprintf("\n\nFILE AVAILABLE: %s (%d bytes) at path: %s", fileInfo.Name(), fileInfo.Size(), absolutePath)
+			fmt.Fprintf(&attachmentNote, "\n\nFILE AVAILABLE: %s (%d bytes) at path: %s", fileInfo.Name(), fileInfo.Size(), absolutePath)
 			if attachment.Type == "image" {
-				goalDescription += "\nThe image is attached directly to the model message for visual analysis."
+				attachmentNote.WriteString("\nThe image is attached directly to the model message for visual analysis.")
 			} else {
-				goalDescription += "\nUse the allowed command-line tools to inspect this file when needed."
+				attachmentNote.WriteString("\nUse the allowed command-line tools to inspect this file when needed.")
 			}
 		}
 	}
@@ -415,6 +440,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		return nil, fmt.Errorf("load agent prompt: %w", err)
 	}
 	run := newAgentRun(sessionID, goalDescription, systemPrompt, systemPromptName)
+	run.AttachmentNote = strings.TrimSpace(attachmentNote.String())
 	run.GoalSpec = normalizeAgentGoalSpec(AgentGoalSpec{
 		Objective:          request.Goal,
 		ExpectedOutput:     request.ExpectedOutput,

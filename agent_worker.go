@@ -77,6 +77,7 @@ type AgentRun struct {
 	Plan                []AgentPlanStep `json:"plan,omitempty"`
 	CandidateHistory    []string        `json:"candidateHistory,omitempty"`
 	UserRequirements    []string        `json:"userRequirements,omitempty"`
+	AttachmentNote      string          `json:"attachmentNote,omitempty"`
 }
 
 type AgentPlanStep struct {
@@ -151,7 +152,11 @@ func normalizeAgentGoalSpec(spec AgentGoalSpec) AgentGoalSpec {
 
 func agentGoalDescription(run *AgentRun) string {
 	spec := normalizeAgentGoalSpec(run.GoalSpec)
-	return fmt.Sprintf("OBJECTIVE:\n%s\n\nEXPECTED OUTPUT:\n%s\n\nCONSTRAINTS:\n%s\n\nCOMPLETION CRITERIA:\n%s", spec.Objective, spec.ExpectedOutput, emptyAgentValue(spec.Constraints), spec.CompletionCriteria)
+	description := fmt.Sprintf("OBJECTIVE:\n%s\n\nEXPECTED OUTPUT:\n%s\n\nCONSTRAINTS:\n%s\n\nCOMPLETION CRITERIA:\n%s", spec.Objective, spec.ExpectedOutput, emptyAgentValue(spec.Constraints), spec.CompletionCriteria)
+	if run.AttachmentNote != "" {
+		description += "\n\nATTACHMENTS:\n" + run.AttachmentNote
+	}
+	return description
 }
 
 func emptyAgentValue(value string) string {

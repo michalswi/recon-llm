@@ -137,3 +137,52 @@ func TestPersistentDirectoryAttachmentsSendAllImages(t *testing.T) {
 		t.Fatal("/deattach did not clear persistent attachments")
 	}
 }
+
+func TestDeattachWithPathRemovesOnlyThatFile(t *testing.T) {
+	firstPath := filepath.Join(t.TempDir(), "a.txt")
+	secondPath := filepath.Join(t.TempDir(), "b.txt")
+	if err := os.WriteFile(firstPath, []byte("a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("b"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	terminalAttachmentPaths = nil
+	t.Cleanup(func() { terminalAttachmentPaths = nil })
+	if !handleAgentCLICommand("/attach " + firstPath) {
+		t.Fatal("/attach was not handled")
+	}
+	if !handleAgentCLICommand("/attach " + secondPath) {
+		t.Fatal("/attach was not handled")
+	}
+	if !handleAgentCLICommand("/deattach " + firstPath) {
+		t.Fatal("/deattach was not handled")
+	}
+	if len(terminalAttachmentPaths) != 1 || terminalAttachmentPaths[0] != secondPath {
+		t.Fatalf("terminalAttachmentPaths = %#v, want only %q", terminalAttachmentPaths, secondPath)
+	}
+}
+
+func TestNonImageAttachmentNoteReachesModelPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	docPath := filepath.Join(t.TempDir(), "rules.pdf")
+	if err := os.WriteFile(docPath, []byte("content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := newTerminalAgentSession(AgentRequest{Goal: "make description of this file", FilePath: docPath})
+	if err != nil {
+		t.Fatalf("newTerminalAgentSession returned error: %v", err)
+	}
+	if sess.AgentRun.AttachmentNote == "" {
+		t.Fatal("AttachmentNote was not set on the run")
+	}
+	messages, err := agentMessages(sess)
+	if err != nil {
+		t.Fatalf("agentMessages returned error: %v", err)
+	}
+	if !strings.Contains(messages[0].Content, "rules.pdf") {
+		t.Fatalf("system prompt does not mention attached file: %q", messages[0].Content)
+	}
+}
