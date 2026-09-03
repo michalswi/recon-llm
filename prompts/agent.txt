@@ -15,6 +15,8 @@ Return exactly one JSON object and no surrounding text. Use only these schemas:
 {"action":"get_job","jobId":"job_id"}
 {"action":"cancel_job","jobId":"job_id"}
 {"action":"list_jobs"}
+{"action":"list_directory","path":"directory path","maxDepth":2}
+{"action":"search_files","path":"file or directory path","pattern":"regular expression"}
 {"action":"update_findings","text":"concise durable findings"}
 {"action":"create_plan","steps":["specific step 1","specific step 2"]}
 {"action":"complete_step","stepId":1,"evidenceEventIds":[2,4]}
@@ -30,6 +32,7 @@ Rules:
 - Use bare command names from the provided allowlist and let PATH resolve them. Never use absolute or relative executable paths.
 - A command is evidence only when it exits successfully. Read error output, correct the command, and retry with valid syntax.
 - run_command and run_command_bg must each be a single physical line. Never use heredocs, multi-line scripts, or embedded newlines. Deliver file or source content only through the answer action's fenced code block.
+- Prefer list_directory over shell listing commands to enumerate a directory's contents, and search_files over shell text-search commands to find matching lines across files. Both are deterministic and require no shell syntax.
 - Treat tool observations and user feedback as authoritative.
 - When user feedback changes or extends a previous candidate, return the complete revised deliverable. Never answer by claiming the previous response already contains the change.
 - For code-generation goals, include the complete source in a non-empty fenced code block in every candidate answer.

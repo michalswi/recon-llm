@@ -42,6 +42,9 @@ type ChatResponse struct {
 type ToolResponse struct {
 	Action           string   `json:"action"`
 	Command          string   `json:"command,omitempty"`
+	Path             string   `json:"path,omitempty"`
+	Pattern          string   `json:"pattern,omitempty"`
+	MaxDepth         int      `json:"maxDepth,omitempty"`
 	Text             string   `json:"text,omitempty"`
 	JobID            string   `json:"jobId,omitempty"`
 	Steps            []string `json:"steps,omitempty"`

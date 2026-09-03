@@ -101,6 +101,7 @@ The API has no authentication and can initiate commands through the agent. It is
 - Evidence requirements for completed plan steps and explicit command goals
 - Revision and clarification feedback retained as first-class context
 - Background jobs scoped to their owning run and cancelled during cleanup
+- Deterministic, native `list_directory` and `search_files` actions for exploring directories with many files, without shell syntax
 
 Run snapshots are written to `~/.recon/agent_runs/<run-id>.json`. Attachments are referenced by their existing local path and are never copied or deleted by recon.
 

@@ -77,11 +77,15 @@ Supported actions are:
 - `get_job`
 - `cancel_job`
 - `list_jobs`
+- `list_directory`
+- `search_files`
 - `update_findings`
 - `request_clarification`
 - `answer`
 
 The decoder requires exactly one JSON object and rejects unknown fields or trailing content. Tool failures become observations so the agent can recover.
+
+`list_directory` and `search_files` are native Go implementations, not shell commands; they bypass the command allowlist entirely and cannot fail on shell syntax. `list_directory` walks a directory up to `maxDepth` (default and max 6), capped at 2000 entries. `search_files` runs a Go regular expression across a file or a directory's text files (skipping binaries and files over 2 MiB), capped at 200 matches.
 
 ## Limits and Verification
 

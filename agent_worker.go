@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -23,6 +26,11 @@ const (
 	agentMaxObservation = 32 * 1024
 	agentContextTokens  = 4096
 	agentSummaryTokens  = 768
+
+	maxAgentListEntries    = 2000
+	maxAgentListDepth      = 6
+	maxAgentSearchMatches  = 200
+	maxAgentSearchFileSize = 2 << 20
 )
 
 type AgentRunStatus string
@@ -766,6 +774,17 @@ func parseAgentAction(raw string) (ToolResponse, error) {
 			return ToolResponse{}, fmt.Errorf("action %q requires jobId", action.Action)
 		}
 	case "list_jobs":
+	case "list_directory":
+		if strings.TrimSpace(action.Path) == "" {
+			return ToolResponse{}, errors.New("action list_directory requires path")
+		}
+	case "search_files":
+		if strings.TrimSpace(action.Path) == "" || strings.TrimSpace(action.Pattern) == "" {
+			return ToolResponse{}, errors.New("action search_files requires path and pattern")
+		}
+		if _, err := regexp.Compile(action.Pattern); err != nil {
+			return ToolResponse{}, fmt.Errorf("invalid search pattern: %w", err)
+		}
 	case "create_plan":
 		if len(action.Steps) == 0 {
 			return ToolResponse{}, errors.New("action create_plan requires at least one step")
@@ -879,6 +898,14 @@ func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResp
 		}
 		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("job %s started", job.ID)})
 		return true
+	case "list_directory":
+		output, success := listAgentDirectory(action.Path, action.MaxDepth)
+		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("list_directory path=%q maxDepth=%d", action.Path, action.MaxDepth), Output: truncateAgentText(output), Success: success})
+		return true
+	case "search_files":
+		output, success := searchAgentFiles(action.Path, action.Pattern)
+		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("search_files path=%q pattern=%q", action.Path, action.Pattern), Output: truncateAgentText(output), Success: success})
+		return true
 	case "check_job", "get_job":
 		job, ok := jobStore.get(action.JobID)
 		if !ok || job.SessionID != sess.ID {
@@ -936,6 +963,147 @@ func runAgentCommand(ctx context.Context, command string) (string, bool) {
 		output = "(no output)"
 	}
 	return output, err == nil && ctx.Err() == nil
+}
+
+// listAgentDirectory produces a deterministic, depth-limited directory listing
+// without requiring the model to compose ls/find/tree syntax.
+func listAgentDirectory(rootPath string, maxDepth int) (string, bool) {
+	rootPath = strings.TrimSpace(rootPath)
+	if rootPath == "" {
+		return "path is required", false
+	}
+	absoluteRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return err.Error(), false
+	}
+	info, err := os.Stat(absoluteRoot)
+	if err != nil {
+		return err.Error(), false
+	}
+	if !info.IsDir() {
+		return fmt.Sprintf("%s is not a directory", absoluteRoot), false
+	}
+	if maxDepth <= 0 || maxDepth > maxAgentListDepth {
+		maxDepth = maxAgentListDepth
+	}
+
+	var lines []string
+	truncated := false
+	walkErr := filepath.WalkDir(absoluteRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		relative, relErr := filepath.Rel(absoluteRoot, path)
+		if relErr != nil || relative == "." {
+			return nil
+		}
+		depth := len(strings.Split(relative, string(filepath.Separator)))
+		if depth > maxDepth {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if len(lines) >= maxAgentListEntries {
+			truncated = true
+			return fs.SkipAll
+		}
+		kind := "file"
+		var size int64
+		if entry.IsDir() {
+			kind = "dir"
+		} else if fileInfo, statErr := entry.Info(); statErr == nil {
+			size = fileInfo.Size()
+		}
+		lines = append(lines, fmt.Sprintf("%s\t%s\t%d", kind, relative, size))
+		return nil
+	})
+	if walkErr != nil {
+		return walkErr.Error(), false
+	}
+	if len(lines) == 0 {
+		return fmt.Sprintf("%s is empty", absoluteRoot), true
+	}
+	sort.Strings(lines)
+	header := fmt.Sprintf("%d entries under %s (maxDepth=%d)", len(lines), absoluteRoot, maxDepth)
+	if truncated {
+		header += fmt.Sprintf(", truncated at %d entries", maxAgentListEntries)
+	}
+	return header + "\n" + strings.Join(lines, "\n"), true
+}
+
+// searchAgentFiles runs a Go-native regex search over text files, avoiding
+// shell grep syntax entirely.
+func searchAgentFiles(rootPath, pattern string) (string, bool) {
+	rootPath = strings.TrimSpace(rootPath)
+	if rootPath == "" {
+		return "path is required", false
+	}
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return fmt.Sprintf("invalid pattern: %v", err), false
+	}
+	absoluteRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return err.Error(), false
+	}
+	info, err := os.Stat(absoluteRoot)
+	if err != nil {
+		return err.Error(), false
+	}
+
+	var matches []string
+	truncated := false
+	scanFile := func(path string) bool {
+		fileInfo, statErr := os.Stat(path)
+		if statErr != nil || fileInfo.Size() > maxAgentSearchFileSize {
+			return true
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || !looksLikeText(data) {
+			return true
+		}
+		relative, relErr := filepath.Rel(absoluteRoot, path)
+		if relErr != nil {
+			relative = path
+		}
+		for lineNumber, line := range strings.Split(string(data), "\n") {
+			if len(matches) >= maxAgentSearchMatches {
+				truncated = true
+				return false
+			}
+			if regex.MatchString(line) {
+				matches = append(matches, fmt.Sprintf("%s:%d: %s", relative, lineNumber+1, strings.TrimSpace(line)))
+			}
+		}
+		return true
+	}
+
+	if info.IsDir() {
+		walkErr := filepath.WalkDir(absoluteRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() {
+				return nil
+			}
+			if !scanFile(path) {
+				return fs.SkipAll
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return walkErr.Error(), false
+		}
+	} else {
+		scanFile(absoluteRoot)
+	}
+
+	if len(matches) == 0 {
+		return fmt.Sprintf("no matches for %q under %s", pattern, absoluteRoot), true
+	}
+	header := fmt.Sprintf("%d match(es) for %q under %s", len(matches), pattern, absoluteRoot)
+	if truncated {
+		header += fmt.Sprintf(" (truncated at %d)", maxAgentSearchMatches)
+	}
+	return header + "\n" + strings.Join(matches, "\n"), true
 }
 
 func recordAgentFailure(sess *agentSession, message string) bool {
