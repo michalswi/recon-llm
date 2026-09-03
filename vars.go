@@ -29,6 +29,7 @@ Never include backticks, comments, or extra keys.
 var ollamaURL = utils.GetEnv("OLLAMA_URL", "http://localhost:11434/api/chat")
 var modelName = utils.GetEnv("OLLAMA_MODEL", "qwen3.5:0.8b")
 var systemPrompt, systemPromptName = utils.LoadSystemPromptWithName(defaultSystemPrompt)
+var agentAPIAddress = utils.GetEnv("RECON_API_ADDRESS", "")
 
 var thinkingEnabled bool
 var startTime time.Time

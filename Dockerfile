@@ -22,6 +22,7 @@ COPY --chown=dummy help.go help.go
 COPY --chown=dummy vars.go vars.go
 COPY --chown=dummy agent_worker.go agent_worker.go
 COPY --chown=dummy agent_terminal.go agent_terminal.go
+COPY --chown=dummy agent_api.go agent_api.go
 
 COPY --chown=dummy go.mod go.mod
 COPY --chown=dummy go.sum go.sum

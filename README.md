@@ -24,6 +24,7 @@ Keep `prompts/` beside the binary because `prompts/agent.txt` is a runtime depen
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama-compatible chat endpoint |
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used by the worker, critic, and compactor |
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
+| `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 
 ## Terminal Workflow
 
@@ -32,6 +33,37 @@ Enter an objective directly to start a run. Use `/agent [GOAL]` for the structur
 The agent prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
 
 Run `/h` for all terminal controls. Prompt selection and thinking mode apply to subsequent runs.
+
+## Agent API
+
+Run the headless API explicitly with a loopback address:
+
+```sh
+./recon -api-address 127.0.0.1:8080
+```
+
+`RECON_API_ADDRESS=127.0.0.1:8080 ./recon` is equivalent. Create a run and inspect its status with:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/api/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"goal":"inspect the current directory","constraints":"read only"}'
+
+curl -sS http://127.0.0.1:8080/api/agent/runs/<run-id>
+```
+
+The API follows the same worker and critic lifecycle as the terminal:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Check server availability |
+| `POST` | `/api/agent/runs` | Create and start a run |
+| `GET` | `/api/agent/runs/{id}` | Read run status, events, and candidate output |
+| `POST` | `/api/agent/runs/{id}/feedback` | Submit `{"feedback":"..."}` for clarification or revision |
+| `POST` | `/api/agent/runs/{id}/approve` | Accept a verified candidate |
+| `POST` | `/api/agent/runs/{id}/cancel` | Cancel a live or waiting run |
+
+The API has no authentication and can initiate commands through the agent. It is disabled by default; keep it bound to loopback unless it is protected by a trusted authenticated proxy.
 
 ## Agent Guarantees
 

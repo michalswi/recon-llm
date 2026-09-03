@@ -4,7 +4,7 @@
 
 ## Purpose
 
-`recon` is a terminal-only Go application that runs an autonomous agent against an Ollama-compatible chat endpoint. It is an orchestrator, not a model runtime. There is no browser UI, HTTP server, user account system, or remote command API.
+`recon` is a Go application that runs an autonomous agent against an Ollama-compatible chat endpoint. It is an orchestrator, not a model runtime. It has a terminal interface and an opt-in headless HTTP API for integration testing and automation. There is no browser UI or user account system.
 
 A user submits an objective. The backend worker repeatedly asks the model for one strict JSON action, executes or records that action, and feeds observations back to the model. A separate critic verifies candidate answers before the terminal asks the user to accept or revise them.
 
@@ -12,6 +12,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 
 - `runtime.go`: shared data types, Ollama client, background jobs, statistics, and persistence helpers.
 - `agent_terminal.go`: terminal entry point, structured goal input, attachment paths, live event rendering, clarification, approval, revision, and cancellation.
+- `agent_api.go`: opt-in HTTP entry point for creating, inspecting, resuming, approving, and cancelling agent runs.
 - `agent_worker.go`: run/event model, limits, strict action parser, planning, context compaction, tool execution, critic verification, and cleanup.
 - `comm.go`: command-name allowlist.
 - `help.go`: terminal help and system-prompt selection.
@@ -27,6 +28,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama-compatible chat endpoint |
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used for worker and critic calls |
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
+| `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 
 The application sends non-streaming chat requests. Agent calls set `format: "json"`; thinking is controlled with `/think-on` and `/think-off`.
 
@@ -42,6 +44,18 @@ The worker runs synchronously while emitting plans, commands, observations, erro
 - `waiting_approval`: the terminal displays the verified candidate and allows accept, revision feedback, or stop.
 
 Terminal run snapshots are persisted under `~/.recon/agent_runs/<run-id>.json`. They provide an audit record; automatic restart/resume is not currently implemented.
+
+## API Lifecycle
+
+The API is enabled with `-api-address <address>` or `RECON_API_ADDRESS`; it is disabled by default and replaces the interactive terminal loop for that process. It reuses the terminal session constructor and worker rather than implementing a separate agent engine.
+
+- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object.
+- `GET /api/agent/runs/{id}` returns sanitized run state, events, plans, and candidate output.
+- `POST /api/agent/runs/{id}/feedback` resumes clarification or revises a candidate.
+- `POST /api/agent/runs/{id}/approve` accepts a verified candidate.
+- `POST /api/agent/runs/{id}/cancel` cancels active work and run-owned jobs.
+
+The in-memory API registry is process-local. Persisted snapshots remain audit records and are not loaded after restart. The API has no authentication and must remain loopback-bound or be protected by a trusted authenticated proxy.
 
 ## Agent Actions
 
@@ -82,11 +96,11 @@ Do not claim the allowlist is a security boundary. Use recon only in a trusted e
 
 ## Product Invariants
 
-- The application is agent-only and terminal-only.
+- The application is agent-only, with terminal and opt-in headless API interfaces.
 - Preserve the worker-owned loop, planning, critic, retries, context compaction, evidence, jobs, attachments, clarification, revision, approval, cancellation, and limits.
 - Keep agent actions strict and machine-readable.
 - Keep prompt files as runtime filesystem dependencies.
 - Keep run snapshots compatible when practical.
-- Do not add a Web UI or HTTP command surface without an explicit product change.
+- Do not add a Web UI without an explicit product change.
 
 </application_context>

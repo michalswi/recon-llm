@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -21,14 +22,23 @@ type FileAttachment struct {
 }
 
 type AgentRequest struct {
-	Goal               string
-	ExpectedOutput     string
-	Constraints        string
-	CompletionCriteria string
-	FilePath           string
+	Goal               string `json:"goal"`
+	ExpectedOutput     string `json:"expectedOutput,omitempty"`
+	Constraints        string `json:"constraints,omitempty"`
+	CompletionCriteria string `json:"completionCriteria,omitempty"`
+	FilePath           string `json:"filePath,omitempty"`
 }
 
 func main() {
+	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
+	flag.Parse()
+	if strings.TrimSpace(*apiAddressFlag) != "" {
+		if err := runAgentAPIServer(strings.TrimSpace(*apiAddressFlag)); err != nil {
+			fmt.Println(warn("Agent API failed:"), err)
+		}
+		return
+	}
+
 	ShowBanner()
 	startTime = time.Now()
 	reader := bufio.NewReader(os.Stdin)
