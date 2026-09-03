@@ -95,8 +95,7 @@ func main() {
 	fmt.Println(info("Use /agent for the structured goal form or /h for help.\n"))
 
 	for {
-		fmt.Print(goalLabel("[goal]: "))
-		line, err := reader.ReadString('\n')
+		line, err := readGoalLine(reader)
 		if err != nil && !errors.Is(err, io.EOF) {
 			fmt.Println(warn("Read error:"), err)
 			return
@@ -581,7 +580,22 @@ func formatAgentDisplayText(text string) string {
 }
 
 func promptLine(reader *bufio.Reader, label string) (string, error) {
+	if line, err, ok := readInteractiveLine(reader, accent(label)); ok {
+		return line, err
+	}
 	fmt.Print(accent(label))
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func readGoalLine(reader *bufio.Reader) (string, error) {
+	if line, err, ok := readInteractiveLine(reader, goalLabel("[goal]: ")); ok {
+		return line, err
+	}
+	fmt.Print(goalLabel("[goal]: "))
 	line, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err

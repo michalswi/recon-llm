@@ -37,6 +37,10 @@ List models available in Ollama with:
 ./recon -check-ollama-models
 ```
 
+## Terminal Line Editing
+
+When stdin is an interactive terminal (macOS or Linux), the `[goal]:` prompt and other free-text prompts support left/right arrow cursor movement, backspace, and up/down arrow history navigation across the session. History is persisted to `~/.recon/history` (capped at 500 entries) and shared across runs. Piped or non-interactive input falls back to plain line reading automatically.
+
 ## Configuration
 
 | Variable | Default | Purpose |

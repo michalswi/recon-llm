@@ -40,6 +40,10 @@ The application sends non-streaming chat requests. Agent calls set `format: "jso
 
 `-check-ollama-models` queries the host's `/api/tags` endpoint, prints available models with size and modified time, and exits the same way. The terminal `/ollama-models` command runs the same check interactively.
 
+## Terminal Line Editing
+
+On macOS and Linux, interactive stdin prompts (`[goal]:`, clarification, revision feedback, structured `/agent` fields) support arrow-key cursor movement and up/down history recall, implemented with direct termios ioctl calls (`termios_darwin.go`, `termios_linux.go`) and no external dependency. History is persisted to `~/.recon/history`. Non-interactive or piped stdin automatically falls back to plain line reading, preserving existing scripted and test behavior.
+
 ## Terminal Lifecycle
 
 Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, and optional attachment path.
