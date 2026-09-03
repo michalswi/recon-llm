@@ -60,7 +60,7 @@ func main() {
 	fmt.Println(info("Use /agent for the structured goal form or /h for help.\n"))
 
 	for {
-		fmt.Print(goalLabel("Goal: "))
+		fmt.Print(goalLabel("[goal]: "))
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
 			fmt.Println(warn("Read error:"), err)
