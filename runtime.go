@@ -354,6 +354,48 @@ func checkOllamaReachable(ctx context.Context, chatURL string) (string, error) {
 	return fmt.Sprintf("Ollama reachable at %s (%d model(s) available)", tagsURL, len(payload.Models)), nil
 }
 
+// checkOllamaModels queries Ollama's /api/tags endpoint to list available models.
+func checkOllamaModels(ctx context.Context, chatURL string) (string, error) {
+	parsed, err := url.Parse(chatURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid OLLAMA_URL %q", chatURL)
+	}
+	tagsURL := fmt.Sprintf("%s://%s/api/tags", parsed.Scheme, parsed.Host)
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("could not reach %s: %w", tagsURL, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("%s returned %s", tagsURL, response.Status)
+	}
+
+	var payload struct {
+		Models []struct {
+			Name       string `json:"name"`
+			Size       int64  `json:"size"`
+			ModifiedAt string `json:"modified_at"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("unexpected response from %s: %w", tagsURL, err)
+	}
+	if len(payload.Models) == 0 {
+		return "No models available in Ollama.", nil
+	}
+	var lines strings.Builder
+	fmt.Fprintf(&lines, "%d model(s) available in Ollama:", len(payload.Models))
+	for _, model := range payload.Models {
+		fmt.Fprintf(&lines, "\n  %s: size=%d modified_at=%s", model.Name, model.Size, model.ModifiedAt)
+	}
+	return lines.String(), nil
+}
+
 // checkOllamaPS queries Ollama's /api/ps endpoint to list currently loaded models.
 func checkOllamaPS(ctx context.Context, chatURL string) (string, error) {
 	parsed, err := url.Parse(chatURL)

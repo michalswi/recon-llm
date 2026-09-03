@@ -23,6 +23,7 @@ func printHelp() {
 	fmt.Println("  /up            Show app uptime")
 	fmt.Println("  /ollama        Check whether the Ollama server is reachable")
 	fmt.Println("  /ollama-ps     Show models currently loaded in Ollama")
+	fmt.Println("  /ollama-models Show models available in Ollama")
 	fmt.Println("  /attach PATH   Attach a file or directory for subsequent runs")
 	fmt.Println("  /attached      List currently attached files")
 	fmt.Println("  /deattach      Clear persistent attachments (/detach also works)")

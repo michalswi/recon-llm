@@ -41,6 +41,7 @@ var terminalAttachmentPaths []string
 func main() {
 	checkOllamaFlag := flag.Bool("check-ollama", false, "check whether the configured Ollama server is reachable, then exit")
 	checkOllamaPSFlag := flag.Bool("check-ollama-ps", false, "show models currently loaded in Ollama (/api/ps), then exit")
+	checkOllamaModelsFlag := flag.Bool("check-ollama-models", false, "show models available in Ollama (/api/tags), then exit")
 	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
 	flag.Parse()
 
@@ -60,6 +61,18 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		message, err := checkOllamaPS(ctx, ollamaURL)
+		if err != nil {
+			fmt.Println(warn("Ollama unreachable:"), err)
+			os.Exit(1)
+		}
+		fmt.Println(success(message))
+		return
+	}
+
+	if *checkOllamaModelsFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		message, err := checkOllamaModels(ctx, ollamaURL)
 		if err != nil {
 			fmt.Println(warn("Ollama unreachable:"), err)
 			os.Exit(1)
@@ -151,6 +164,15 @@ func handleAgentCLICommand(input string) bool {
 	case "/ollama-ps":
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		message, err := checkOllamaPS(ctx, ollamaURL)
+		cancel()
+		if err != nil {
+			fmt.Println(warn("Ollama unreachable:"), err)
+		} else {
+			fmt.Println(success(message))
+		}
+	case "/ollama-models":
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		message, err := checkOllamaModels(ctx, ollamaURL)
 		cancel()
 		if err != nil {
 			fmt.Println(warn("Ollama unreachable:"), err)

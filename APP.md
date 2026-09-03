@@ -38,6 +38,8 @@ The application sends non-streaming chat requests. Agent calls set `format: "jso
 
 `-check-ollama-ps` queries the host's `/api/ps` endpoint, prints currently loaded models with size and expiry, and exits the same way. The terminal `/ollama-ps` command runs the same check interactively.
 
+`-check-ollama-models` queries the host's `/api/tags` endpoint, prints available models with size and modified time, and exits the same way. The terminal `/ollama-models` command runs the same check interactively.
+
 ## Terminal Lifecycle
 
 Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, and optional attachment path.
