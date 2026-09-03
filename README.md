@@ -17,6 +17,14 @@ make build
 
 Keep `prompts/` beside the binary because `prompts/agent.txt` is a runtime dependency.
 
+Check that Ollama is reachable at any time with:
+
+```sh
+./recon -check-ollama
+```
+
+This exits `0` and prints the reachable URL and model count, or exits `1` with the connection error.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -32,7 +40,7 @@ Enter an objective directly to start a run. Use `/agent [GOAL]` for the structur
 
 The agent prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
 
-Run `/h` for all terminal controls. Prompt selection and thinking mode apply to subsequent runs.
+Run `/h` for all terminal controls, including `/ollama` to re-check server reachability without restarting. Prompt selection and thinking mode apply to subsequent runs.
 
 ## Agent API
 
@@ -62,6 +70,8 @@ The API follows the same worker and critic lifecycle as the terminal:
 | `POST` | `/api/agent/runs/{id}/feedback` | Submit `{"feedback":"..."}` for clarification or revision |
 | `POST` | `/api/agent/runs/{id}/approve` | Accept a verified candidate |
 | `POST` | `/api/agent/runs/{id}/cancel` | Cancel a live or waiting run |
+
+Each response includes `sessionId`, which names the persisted snapshot at `~/.recon/agent_runs/<sessionId>.json`.
 
 The API has no authentication and can initiate commands through the agent. It is disabled by default; keep it bound to loopback unless it is protected by a trusted authenticated proxy.
 

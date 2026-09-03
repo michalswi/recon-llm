@@ -30,8 +30,22 @@ type AgentRequest struct {
 }
 
 func main() {
+	checkOllamaFlag := flag.Bool("check-ollama", false, "check whether the configured Ollama server is reachable, then exit")
 	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
 	flag.Parse()
+
+	if *checkOllamaFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		message, err := checkOllamaReachable(ctx, ollamaURL)
+		if err != nil {
+			fmt.Println(warn("Ollama unreachable:"), err)
+			os.Exit(1)
+		}
+		fmt.Println(success(message))
+		return
+	}
+
 	if strings.TrimSpace(*apiAddressFlag) != "" {
 		if err := runAgentAPIServer(strings.TrimSpace(*apiAddressFlag)); err != nil {
 			fmt.Println(warn("Agent API failed:"), err)
@@ -102,6 +116,15 @@ func handleAgentCLICommand(input string) bool {
 		fmt.Println(info("Model: " + modelName))
 	case "/up":
 		fmt.Println(info("Uptime: " + formatUptime()))
+	case "/ollama":
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		message, err := checkOllamaReachable(ctx, ollamaURL)
+		cancel()
+		if err != nil {
+			fmt.Println(warn("Ollama unreachable:"), err)
+		} else {
+			fmt.Println(success(message))
+		}
 	case "/sysprompt":
 		printSystemPrompt()
 	case "/editsysprompt":

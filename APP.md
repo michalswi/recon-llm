@@ -10,7 +10,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 
 ## Repository Map
 
-- `runtime.go`: shared data types, Ollama client, background jobs, statistics, and persistence helpers.
+- `runtime.go`: shared data types, Ollama client, Ollama reachability check, background jobs, statistics, and persistence helpers.
 - `agent_terminal.go`: terminal entry point, structured goal input, attachment paths, live event rendering, clarification, approval, revision, and cancellation.
 - `agent_api.go`: opt-in HTTP entry point for creating, inspecting, resuming, approving, and cancelling agent runs.
 - `agent_worker.go`: run/event model, limits, strict action parser, planning, context compaction, tool execution, critic verification, and cleanup.
@@ -31,6 +31,10 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 
 The application sends non-streaming chat requests. Agent calls set `format: "json"`; thinking is controlled with `/think-on` and `/think-off`.
+
+## Diagnostics
+
+`-check-ollama` queries the configured `OLLAMA_URL` host's `/api/tags` endpoint, prints reachability and model count, and exits without starting the terminal or API. The terminal `/ollama` command runs the same check interactively during a session.
 
 ## Terminal Lifecycle
 

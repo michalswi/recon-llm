@@ -26,7 +26,9 @@ type apiAgentRun struct {
 }
 
 type agentAPIRunResponse struct {
-	ID                  string          `json:"id"`
+	ID string `json:"id"`
+	// SessionID names the persisted snapshot at ~/.recon/agent_runs/<sessionId>.json.
+	SessionID           string          `json:"sessionId"`
 	GoalSpec            AgentGoalSpec   `json:"goalSpec"`
 	Status              AgentRunStatus  `json:"status"`
 	Iteration           int             `json:"iteration"`
@@ -242,6 +244,7 @@ func (entry *apiAgentRun) start() {
 func newAgentAPIRunResponse(run *AgentRun) agentAPIRunResponse {
 	return agentAPIRunResponse{
 		ID:                  run.ID,
+		SessionID:           run.SessionID,
 		GoalSpec:            run.GoalSpec,
 		Status:              run.Status,
 		Iteration:           run.Iteration,

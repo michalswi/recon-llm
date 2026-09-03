@@ -21,6 +21,7 @@ func printHelp() {
 	fmt.Println("  /dir           Show current working directory")
 	fmt.Println("  /m             Show the Ollama model")
 	fmt.Println("  /up            Show app uptime")
+	fmt.Println("  /ollama        Check whether the Ollama server is reachable")
 	fmt.Println("  /sysprompt     Show the agent base prompt")
 	fmt.Println("  /editsysprompt Select or enter an agent base prompt")
 	fmt.Println("  /think-on      Enable model reasoning")

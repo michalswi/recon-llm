@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -316,6 +317,39 @@ func callOllamaMessageWithLogContext(ctx context.Context, origin string, message
 	message, err := callOllamaMessageContext(ctx, messages, forceJSON, think)
 	log.Printf("[ollama][%s] messages=%d model=%s json-mode=%v think=%v dur=%s err=%v", origin, len(messages), modelName, forceJSON, think, time.Since(started).Round(time.Millisecond), err)
 	return message, err
+}
+
+// checkOllamaReachable queries the Ollama server's model list to confirm it is up,
+// without invoking the chat/completion endpoint.
+func checkOllamaReachable(ctx context.Context, chatURL string) (string, error) {
+	parsed, err := url.Parse(chatURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid OLLAMA_URL %q", chatURL)
+	}
+	tagsURL := fmt.Sprintf("%s://%s/api/tags", parsed.Scheme, parsed.Host)
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("could not reach %s: %w", tagsURL, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("%s returned %s", tagsURL, response.Status)
+	}
+
+	var payload struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("unexpected response from %s: %w", tagsURL, err)
+	}
+	return fmt.Sprintf("Ollama reachable at %s (%d model(s) available)", tagsURL, len(payload.Models)), nil
 }
 
 func sanitizeCommand(command string) string {
