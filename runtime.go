@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,49 @@ import (
 
 	"github.com/michalswi/color"
 )
+
+// ollamaHTTPClient is used for all requests to the configured Ollama server. When
+// OLLAMA_CA_CERT names a PEM file, its certificate is trusted in addition to the
+// system pool, so a self-signed cert on a TLS-terminating reverse proxy works.
+var ollamaHTTPClient = newOllamaHTTPClient()
+
+func newOllamaHTTPClient() *http.Client {
+	if strings.TrimSpace(ollamaCACertPath) == "" {
+		return http.DefaultClient
+	}
+	pemData, err := os.ReadFile(ollamaCACertPath)
+	if err != nil {
+		log.Printf("[ollama] could not read OLLAMA_CA_CERT %q: %v", ollamaCACertPath, err)
+		return http.DefaultClient
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pemData) {
+		log.Printf("[ollama] OLLAMA_CA_CERT %q contained no valid certificates", ollamaCACertPath)
+		return http.DefaultClient
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+	return &http.Client{Transport: transport}
+}
+
+// warnIfInsecureOllamaURL flags plain HTTP to a non-loopback host, since prompts,
+// findings, and answers would then cross the network readable and alterable by
+// anyone on path (MITM). Use https:// (e.g. via a TLS-terminating reverse proxy
+// combined with OLLAMA_CA_CERT for a private CA) or an encrypted tunnel instead.
+func warnIfInsecureOllamaURL(rawURL string) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "http" {
+		return
+	}
+	switch parsed.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return
+	}
+	fmt.Println(warn(fmt.Sprintf("Warning: OLLAMA_URL (%s) uses plain HTTP to a non-loopback host; traffic to Ollama is unencrypted and readable/alterable by a network attacker. Use https:// (optionally with OLLAMA_CA_CERT for a private CA) or an encrypted tunnel.", rawURL)))
+}
 
 type ChatMessage struct {
 	Role     string   `json:"role"`
@@ -297,7 +342,7 @@ func callOllamaMessageContext(ctx context.Context, messages []ChatMessage, force
 		return ChatMessage{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := ollamaHTTPClient.Do(request)
 	if err != nil {
 		return ChatMessage{}, err
 	}
@@ -337,7 +382,7 @@ func checkOllamaReachable(ctx context.Context, chatURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := ollamaHTTPClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("could not reach %s: %w", tagsURL, err)
 	}
@@ -369,7 +414,7 @@ func checkOllamaModels(ctx context.Context, chatURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := ollamaHTTPClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("could not reach %s: %w", tagsURL, err)
 	}
@@ -411,7 +456,7 @@ func checkOllamaPS(ctx context.Context, chatURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := ollamaHTTPClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("could not reach %s: %w", psURL, err)
 	}

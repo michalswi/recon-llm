@@ -47,8 +47,12 @@ When stdin is an interactive terminal (macOS or Linux), the `[goal]:` prompt and
 |---|---|---|
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama-compatible chat endpoint |
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used by the worker, critic, and compactor |
+| `OLLAMA_CA_CERT` | unset | Path to a PEM CA certificate to trust, for a self-signed cert on a TLS-terminating Ollama reverse proxy; only takes effect when `OLLAMA_URL` uses `https://` |
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
+
+If `OLLAMA_URL` uses plain HTTP to a non-loopback host, recon prints a startup warning: prompts and responses would cross the network unencrypted. Use `https://` (with `OLLAMA_CA_CERT` for a private CA) or an encrypted tunnel instead.
+
 
 ## Terminal Workflow
 

@@ -27,8 +27,12 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 |---|---|---|
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama-compatible chat endpoint |
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used for worker and critic calls |
+| `OLLAMA_CA_CERT` | unset | Optional path to a PEM CA certificate trusted in addition to the system pool, for a self-signed cert on a TLS-terminating Ollama reverse proxy; has no effect unless `OLLAMA_URL` uses `https://` |
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
+
+All Ollama requests go through a shared HTTP client (`ollamaHTTPClient` in [runtime.go](runtime.go)). If `OLLAMA_URL` uses plain HTTP to a non-loopback host, a startup warning is printed since prompts and responses would cross the network unencrypted and readable/alterable by a network attacker; use `https://` (optionally with `OLLAMA_CA_CERT`) or an encrypted tunnel instead.
+
 
 The application sends non-streaming chat requests. Agent calls set `format: "json"`; thinking is controlled with `/think-on` and `/think-off`.
 

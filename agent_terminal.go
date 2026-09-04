@@ -45,6 +45,8 @@ func main() {
 	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
 	flag.Parse()
 
+	warnIfInsecureOllamaURL(ollamaURL)
+
 	if *checkOllamaFlag {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
