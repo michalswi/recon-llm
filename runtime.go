@@ -28,6 +28,11 @@ import (
 var ollamaHTTPClient = newOllamaHTTPClient()
 
 func newOllamaHTTPClient() *http.Client {
+	if ollamaInsecureSkipVerify {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		return &http.Client{Transport: transport}
+	}
 	if strings.TrimSpace(ollamaCACertPath) == "" {
 		return http.DefaultClient
 	}
@@ -63,6 +68,15 @@ func warnIfInsecureOllamaURL(rawURL string) {
 		return
 	}
 	fmt.Println(warn(fmt.Sprintf("Warning: OLLAMA_URL (%s) uses plain HTTP to a non-loopback host; traffic to Ollama is unencrypted and readable/alterable by a network attacker. Use https:// (optionally with OLLAMA_CA_CERT for a private CA) or an encrypted tunnel.", rawURL)))
+}
+
+// warnIfInsecureOllamaTLS flags disabled certificate validation: it lets any
+// on-path attacker impersonate the Ollama endpoint undetected, for testing only.
+func warnIfInsecureOllamaTLS() {
+	if !ollamaInsecureSkipVerify {
+		return
+	}
+	fmt.Println(warn("Warning: OLLAMA_INSECURE_SKIP_VERIFY is enabled; TLS certificate validation for Ollama is disabled, so a network attacker can impersonate the endpoint undetected. OLLAMA_CA_CERT is ignored while this is set. Use only for local testing; prefer fixing the certificate (e.g. add a SAN) or OLLAMA_CA_CERT otherwise."))
 }
 
 type ChatMessage struct {
@@ -369,6 +383,14 @@ func callOllamaMessageWithLogContext(ctx context.Context, origin string, message
 	return message, err
 }
 
+// ollamaSiblingURL builds a sibling endpoint (e.g. /api/tags) under the same base
+// path as the configured chat URL, so a reverse-proxy/gateway path prefix (e.g.
+// /gateway/recon) is preserved instead of being dropped in favor of the host root.
+func ollamaSiblingURL(parsed *url.URL, endpoint string) string {
+	base := strings.TrimSuffix(parsed.Path, "/api/chat")
+	return fmt.Sprintf("%s://%s%s%s", parsed.Scheme, parsed.Host, base, endpoint)
+}
+
 // checkOllamaReachable queries the Ollama server's model list to confirm it is up,
 // without invoking the chat/completion endpoint.
 func checkOllamaReachable(ctx context.Context, chatURL string) (string, error) {
@@ -376,7 +398,7 @@ func checkOllamaReachable(ctx context.Context, chatURL string) (string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid OLLAMA_URL %q", chatURL)
 	}
-	tagsURL := fmt.Sprintf("%s://%s/api/tags", parsed.Scheme, parsed.Host)
+	tagsURL := ollamaSiblingURL(parsed, "/api/tags")
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
 	if err != nil {
@@ -408,7 +430,7 @@ func checkOllamaModels(ctx context.Context, chatURL string) (string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid OLLAMA_URL %q", chatURL)
 	}
-	tagsURL := fmt.Sprintf("%s://%s/api/tags", parsed.Scheme, parsed.Host)
+	tagsURL := ollamaSiblingURL(parsed, "/api/tags")
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
 	if err != nil {
@@ -450,7 +472,7 @@ func checkOllamaPS(ctx context.Context, chatURL string) (string, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid OLLAMA_URL %q", chatURL)
 	}
-	psURL := fmt.Sprintf("%s://%s/api/ps", parsed.Scheme, parsed.Host)
+	psURL := ollamaSiblingURL(parsed, "/api/ps")
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, psURL, nil)
 	if err != nil {

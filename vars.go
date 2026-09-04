@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"strings"
 	"time"
 
 	"github.com/michalswi/recon/utils"
@@ -32,6 +33,7 @@ Never include backticks, comments, or extra keys.
 
 var ollamaURL = utils.GetEnv("OLLAMA_URL", "http://localhost:11434/api/chat")
 var ollamaCACertPath = utils.GetEnv("OLLAMA_CA_CERT", "")
+var ollamaInsecureSkipVerify = strings.EqualFold(utils.GetEnv("OLLAMA_INSECURE_SKIP_VERIFY", ""), "true")
 var modelName = utils.GetEnv("OLLAMA_MODEL", "qwen3.5:0.8b")
 var systemPrompt, systemPromptName = utils.LoadSystemPromptWithName(defaultSystemPrompt)
 var agentAPIAddress = utils.GetEnv("RECON_API_ADDRESS", "")

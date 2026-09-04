@@ -28,6 +28,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama-compatible chat endpoint |
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used for worker and critic calls |
 | `OLLAMA_CA_CERT` | unset | Optional path to a PEM CA certificate trusted in addition to the system pool, for a self-signed cert on a TLS-terminating Ollama reverse proxy; has no effect unless `OLLAMA_URL` uses `https://` |
+| `OLLAMA_INSECURE_SKIP_VERIFY` | `false` | Disables TLS certificate validation for Ollama connections and ignores `OLLAMA_CA_CERT`. Testing only — a network attacker can impersonate the endpoint undetected |
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 

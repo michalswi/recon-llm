@@ -46,6 +46,7 @@ func main() {
 	flag.Parse()
 
 	warnIfInsecureOllamaURL(ollamaURL)
+	warnIfInsecureOllamaTLS()
 
 	if *checkOllamaFlag {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
