@@ -63,7 +63,7 @@ Use `/attach PATH` to attach a file or the regular files in a directory to every
 
 The agent prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
 
-Run `/h` for all terminal controls, including `/ollama` to re-check server reachability, `/ollama-ps` to list currently loaded models, and `/ollama-models` to list available models, without restarting. Prompt selection and thinking mode apply to subsequent runs.
+Run `/h` for all terminal controls, including `/ollama` to re-check server reachability, `/ollama-ps` to list currently loaded models, and `/ollama-ls` to list available models, without restarting. Prompt selection and thinking mode apply to subsequent runs.
 
 ## Agent API
 

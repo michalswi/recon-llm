@@ -25,7 +25,7 @@ func printHelp() {
 		{"/up", "Show app uptime"},
 		{"/ollama", "Check whether the Ollama server is reachable"},
 		{"/ollama-ps", "Show models currently loaded in Ollama"},
-		{"/ollama-models", "Show models available in Ollama"},
+		{"/ollama-ls", "Show models available in Ollama"},
 		{"/attach PATH", "Attach a file or directory for subsequent runs"},
 		{"/attached", "List currently attached files"},
 		{"/deattach [PATH]", "Clear all persistent attachments, or just PATH (/detach also works)"},

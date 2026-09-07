@@ -32,8 +32,9 @@ type AgentRequest struct {
 }
 
 const (
-	maxAgentAttachments = 16
-	maxAgentImageSize   = 20 << 20
+	maxAgentAttachments         = 16
+	maxAgentImageSize           = 20 << 20
+	maxAgentDocumentExtractSize = 20 << 20
 )
 
 var terminalAttachmentPaths []string
@@ -172,7 +173,7 @@ func handleAgentCLICommand(input string) bool {
 		} else {
 			fmt.Println(success(message))
 		}
-	case "/ollama-models":
+	case "/ollama-ls":
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		message, err := checkOllamaModels(ctx, ollamaURL)
 		cancel()
@@ -432,6 +433,8 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 			fmt.Fprintf(&attachmentNote, "\n\nFILE AVAILABLE: %s (%d bytes) at path: %s", fileInfo.Name(), fileInfo.Size(), absolutePath)
 			if attachment.Type == "image" {
 				attachmentNote.WriteString("\nThe image is attached directly to the model message for visual analysis.")
+			} else if extractedText, extractErr := extractAttachmentText(absolutePath, fileInfo.Size()); extractErr == nil {
+				attachmentNote.WriteString("\nExtracted content:\n" + truncateAgentText(extractedText))
 			} else {
 				attachmentNote.WriteString("\nUse the allowed command-line tools to inspect this file when needed.")
 			}
@@ -475,6 +478,22 @@ func isSupportedImagePath(path string) bool {
 	default:
 		return false
 	}
+}
+
+// extractAttachmentText returns readable text for a non-image attachment via
+// fileextract.go, skipping files too large to extract synchronously at attach time.
+func extractAttachmentText(path string, size int64) (string, error) {
+	if size > maxAgentDocumentExtractSize {
+		return "", fmt.Errorf("attachment exceeds %d MiB extraction limit", maxAgentDocumentExtractSize>>20)
+	}
+	text, err := ExtractTextFromFile(path)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("no text extracted from %s", path)
+	}
+	return text, nil
 }
 
 func resolveAttachmentPaths(path string) ([]string, error) {

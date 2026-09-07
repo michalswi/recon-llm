@@ -43,7 +43,7 @@ The application sends non-streaming chat requests. Agent calls set `format: "jso
 
 `-check-ollama-ps` queries the host's `/api/ps` endpoint, prints currently loaded models with size and expiry, and exits the same way. The terminal `/ollama-ps` command runs the same check interactively.
 
-`-check-ollama-models` queries the host's `/api/tags` endpoint, prints available models with size and modified time, and exits the same way. The terminal `/ollama-models` command runs the same check interactively.
+`-check-ollama-models` queries the host's `/api/tags` endpoint, prints available models with size and modified time, and exits the same way. The terminal `/ollama-ls` command runs the same check interactively.
 
 ## Terminal Line Editing
 
@@ -53,7 +53,7 @@ On macOS and Linux, interactive stdin prompts (`[goal]:`, clarification, revisio
 
 Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, and optional attachment path.
 
-The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path. Supported image attachments are base64-encoded into Ollama messages for worker and critic vision analysis; other files are exposed by path for allowed command-line tools. A plain objective can infer an existing absolute image path, while `/agent` and the API accept explicit attachment paths. `/attach` persists a file or directory's regular files across subsequent terminal runs. `/deattach`/`/detach` clears all persistent attachments, or a single one when given a path; `/attached` lists the current set. At most 16 files are attached per run. Attached file metadata is carried on the run as `AttachmentNote` and included in the objective seen by the worker and critic; images are additionally sent as native Ollama message content.
+The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path. Supported image attachments are base64-encoded into Ollama messages for worker and critic vision analysis. Other attachments have their text extracted via `fileextract.go` (PDF, DOCX, PPTX, DOC, PCAP/PCAPNG/CAP, and plain text, capped at 20 MiB) and inlined into the attachment note, truncated at the shared 32 KiB observation cap; if extraction fails or the file is too large, the note falls back to naming the path for inspection with allowed command-line tools. A plain objective can infer an existing absolute image path, while `/agent` and the API accept explicit attachment paths. `/attach` persists a file or directory's regular files across subsequent terminal runs. `/deattach`/`/detach` clears all persistent attachments, or a single one when given a path; `/attached` lists the current set. At most 16 files are attached per run. Attached file metadata is carried on the run as `AttachmentNote` and included in the objective seen by the worker and critic; images are additionally sent as native Ollama message content.
 
 The worker runs synchronously while emitting plans, commands, observations, errors, and verification feedback to the terminal. Ctrl+C cancels the active context and run-owned jobs. The worker pauses in:
 
