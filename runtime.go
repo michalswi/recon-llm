@@ -214,10 +214,30 @@ func cloneAgentRun(run *AgentRun) *AgentRun {
 	clone.Events = append([]AgentEvent(nil), run.Events...)
 	clone.CandidateHistory = append([]string(nil), run.CandidateHistory...)
 	clone.UserRequirements = append([]string(nil), run.UserRequirements...)
-	clone.Plan = append([]AgentPlanStep(nil), run.Plan...)
+	clone.Plan = clonePlanSteps(run.Plan)
 	return &clone
 }
 
+// clonePlanSteps deep-copies plan steps, including each step's EvidenceEventIDs
+// slice, so callers never share a backing array with the live AgentRun.Plan
+// that complete_step mutates in place under sess.mu.
+func clonePlanSteps(steps []AgentPlanStep) []AgentPlanStep {
+	if steps == nil {
+		return nil
+	}
+	cloned := make([]AgentPlanStep, len(steps))
+	for i, step := range steps {
+		step.EvidenceEventIDs = append([]int(nil), step.EvidenceEventIDs...)
+		cloned[i] = step
+	}
+	return cloned
+}
+
+
+// BackgroundJob is an immutable snapshot of a background job's state, safe to
+// read and share across goroutines without further locking. All mutation goes
+// through JobStore methods; the live *exec.Cmd used for cancellation is kept
+// internally in jobRecord and never exposed on this type.
 type BackgroundJob struct {
 	ID        string
 	Command   string
@@ -226,118 +246,185 @@ type BackgroundJob struct {
 	Error     string
 	StartTime time.Time
 	EndTime   time.Time
-	Cmd       *exec.Cmd
 	SessionID string
 	RunID     string
 	Done      chan struct{} `json:"-"`
 }
 
+// jobRecord holds the mutable state backing a BackgroundJob snapshot; every
+// field access is guarded by JobStore.mu.
+type jobRecord struct {
+	snapshot BackgroundJob
+	cmd      *exec.Cmd
+}
+
 type JobStore struct {
-	mu   sync.RWMutex
-	jobs map[string]*BackgroundJob
+	mu   sync.Mutex
+	jobs map[string]*jobRecord
 }
 
 func newJobStore() *JobStore {
-	return &JobStore{jobs: make(map[string]*BackgroundJob)}
+	return &JobStore{jobs: make(map[string]*jobRecord)}
 }
 
-func (s *JobStore) get(id string) (*BackgroundJob, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	job, ok := s.jobs[id]
-	return job, ok
-}
-
-func (s *JobStore) create(sessionID, command string) *BackgroundJob {
+func (s *JobStore) get(id string) (BackgroundJob, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	job := &BackgroundJob{
+	record, ok := s.jobs[id]
+	if !ok {
+		return BackgroundJob{}, false
+	}
+	return record.snapshot, true
+}
+
+// create registers a new running job, assigning RunID up front so the job is
+// always attributable to its owning run, even before its process starts.
+func (s *JobStore) create(sessionID, runID, command string) BackgroundJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := BackgroundJob{
 		ID:        fmt.Sprintf("job_%d", time.Now().UnixNano()),
 		Command:   command,
 		Status:    "running",
 		StartTime: time.Now(),
 		SessionID: sessionID,
+		RunID:     runID,
 		Done:      make(chan struct{}),
 	}
-	s.jobs[job.ID] = job
+	s.jobs[job.ID] = &jobRecord{snapshot: job}
 	return job
 }
 
-func (s *JobStore) listBySession(sessionID string) []*BackgroundJob {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var jobs []*BackgroundJob
-	for _, job := range s.jobs {
-		if job.SessionID == sessionID {
-			jobs = append(jobs, job)
+// attachCmd records the process handle used later for cancellation.
+func (s *JobStore) attachCmd(id string, cmd *exec.Cmd) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if record, ok := s.jobs[id]; ok {
+		record.cmd = cmd
+	}
+}
+
+func (s *JobStore) listBySession(sessionID string) []BackgroundJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var jobs []BackgroundJob
+	for _, record := range s.jobs {
+		if record.snapshot.SessionID == sessionID {
+			jobs = append(jobs, record.snapshot)
 		}
 	}
 	return jobs
 }
 
-func (s *JobStore) update(job *BackgroundJob) {
+// finish records a job's natural completion (success, failure, or timeout).
+// It only applies if the job is still "running" so a concurrent explicit
+// cancel (see cancel) is never overwritten by a late failed/completed result.
+func (s *JobStore) finish(id, status, output, errText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.jobs[job.ID] = job
+	record, ok := s.jobs[id]
+	if !ok {
+		return
+	}
+	record.snapshot.Output = output
+	if record.snapshot.Status != "running" {
+		return
+	}
+	record.snapshot.Status = status
+	record.snapshot.Error = errText
+	record.snapshot.EndTime = time.Now()
+}
+
+// cancel kills the job's owned process group, if any, and marks the job
+// cancelled unless it already reached a terminal state, in which case that
+// state (completed/failed/timeout) is preserved. Returns false if no job with
+// this ID and session was found.
+func (s *JobStore) cancel(id, sessionID string) bool {
+	s.mu.Lock()
+	record, ok := s.jobs[id]
+	if !ok || record.snapshot.SessionID != sessionID {
+		s.mu.Unlock()
+		return false
+	}
+	cmd := record.cmd
+	s.mu.Unlock()
+
+	if cmd != nil {
+		killProcessGroup(cmd)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok = s.jobs[id]
+	if !ok {
+		return false
+	}
+	if record.snapshot.Status == "running" {
+		record.snapshot.Status = "cancelled"
+		record.snapshot.EndTime = time.Now()
+	}
+	return true
 }
 
 func (s *JobStore) cancelRun(runID string) {
-	s.mu.RLock()
-	var jobs []*BackgroundJob
-	for _, job := range s.jobs {
-		if job.RunID == runID && job.Status == "running" {
-			jobs = append(jobs, job)
+	s.mu.Lock()
+	var cmds []*exec.Cmd
+	for _, record := range s.jobs {
+		if record.snapshot.RunID == runID && record.snapshot.Status == "running" {
+			cmds = append(cmds, record.cmd)
 		}
 	}
-	s.mu.RUnlock()
-	for _, job := range jobs {
-		if job.Cmd != nil && job.Cmd.Process != nil {
-			_ = job.Cmd.Process.Kill()
+	s.mu.Unlock()
+	for _, cmd := range cmds {
+		if cmd != nil {
+			killProcessGroup(cmd)
 		}
 	}
 }
 
 var jobStore = newJobStore()
 
-func executeBackgroundCommand(sessionID, command string) (*BackgroundJob, error) {
+// executeBackgroundCommand starts the process synchronously (so its *exec.Cmd.Process
+// is fully initialized before this function returns and before the job is visible to
+// cancel_job/cancelRun) and waits for completion or timeout in a background goroutine.
+func executeBackgroundCommand(sessionID, runID, command string) (BackgroundJob, error) {
 	command = sanitizeCommand(command)
 	if command == "" {
-		return nil, errors.New("empty command after sanitization")
+		return BackgroundJob{}, errors.New("empty command after sanitization")
 	}
-	job := jobStore.create(sessionID, command)
+	job := jobStore.create(sessionID, runID, command)
 	cmd := exec.Command("bash", "-c", command)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	job.Cmd = cmd
+	configureProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		jobStore.finish(job.ID, "failed", "", err.Error())
+		close(job.Done)
+		return job, nil
+	}
+	jobStore.attachCmd(job.ID, cmd)
 
 	go func() {
 		defer close(job.Done)
 		done := make(chan error, 1)
-		go func() { done <- cmd.Run() }()
+		go func() { done <- cmd.Wait() }()
 		select {
 		case err := <-done:
-			job.EndTime = time.Now()
-			job.Output = stdout.String()
+			errText := ""
+			status := "completed"
 			if err != nil {
-				job.Status = "failed"
-				job.Error = err.Error()
+				status = "failed"
+				errText = err.Error()
 				if stderr.Len() > 0 {
-					job.Error += "\n" + stderr.String()
+					errText += "\n" + stderr.String()
 				}
-			} else {
-				job.Status = "completed"
 			}
+			jobStore.finish(job.ID, status, stdout.String(), errText)
 		case <-time.After(time.Hour):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			job.EndTime = time.Now()
-			job.Status = "timeout"
-			job.Error = "job exceeded maximum duration of 1h"
-			job.Output = stdout.String()
+			killProcessGroup(cmd)
+			jobStore.finish(job.ID, "timeout", stdout.String(), "job exceeded maximum duration of 1h")
 		}
-		jobStore.update(job)
 	}()
 	return job, nil
 }

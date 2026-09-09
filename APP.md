@@ -17,6 +17,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `comm.go`: command-name allowlist.
 - `help.go`: terminal help and system-prompt selection.
 - `fileextract.go`: local document and packet-capture extraction utilities.
+- `procgroup_unix.go`/`procgroup_other.go`: background-job process-group start/kill, platform-specific.
 - `vars.go`: version, built-in prompt, environment configuration, and process state.
 - `prompts/agent.txt`: strict agent action protocol embedded at build time.
 - `prompts/*.txt`: base prompts embedded at build time.

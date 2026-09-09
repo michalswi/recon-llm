@@ -86,7 +86,7 @@ front of the older summary instead of the back, so `CompactedThrough` never adva
 that were silently dropped. Covered by new tests in
 [agent_worker_test.go](agent_worker_test.go).
 
-### 2. Background-job state has unsynchronized pointer access (additive correctness fix)
+### 2. Background-job state has unsynchronized pointer access (additive correctness fix) — IMPLEMENTED
 `JobStore.get` and `listBySession` return pointers after releasing the store lock. The background
 goroutine, `check_job`, `cancel_job`, cleanup, and `run_command_bg` then read or mutate fields on
 the same `BackgroundJob` concurrently. `run_command_bg` also assigns `RunID` after starting the
@@ -104,6 +104,25 @@ The same snapshot discipline should apply to `AgentRun`: `agentSnapshot` current
 sharing its backing array, and `cloneAgentRun` copies plan steps without copying each step's
 `EvidenceEventIDs`. Deep-copy both levels so API encoding, prompt construction, and persistence
 cannot observe concurrent plan mutation.
+
+Implemented: `BackgroundJob` ([runtime.go](runtime.go)) is now an immutable value snapshot with no
+`Cmd` field; `JobStore` stores mutable state (plus the live `*exec.Cmd`) in an unexported
+`jobRecord` behind its mutex and exposes only `get`/`create`/`attachCmd`/`listBySession`/`finish`/
+`cancel`/`cancelRun`, all returning value copies. `executeBackgroundCommand` now takes `runID` and
+assigns it at creation (before the process starts), and calls `cmd.Start()` synchronously so
+`cmd.Process` is fully initialized before the job is attached and visible to `cancel`/`cancelRun` —
+removing the prior unsynchronized read of `cmd.Process`. `finish`/`cancel` only apply a transition
+when the job is still `"running"`, so a process that dies from a `cancel`-triggered kill can never
+overwrite the `"cancelled"` status back to `"failed"`. Cancellation now kills the job's whole
+process group (`killProcessGroup`, POSIX process groups via `configureProcessGroup`/`Setpgid` on
+darwin/linux in [procgroup_unix.go](procgroup_unix.go), falling back to killing only the top-level
+process on other platforms in [procgroup_other.go](procgroup_other.go)) instead of only the `bash`
+shell. `agentSnapshot` ([agent_worker.go](agent_worker.go)) and `cloneAgentRun` ([runtime.go](runtime.go))
+both now deep-copy `Plan` via a shared `clonePlanSteps` helper that also copies each step's
+`EvidenceEventIDs`. Covered by new tests in [runtime_test.go](runtime_test.go) (lifecycle,
+cancel-not-overwritten, wrong-session cancel rejection, session-scoped listing, concurrent-access
+`-race` check, plan/snapshot deep-copy isolation). Full suite + `-race` pass; cross-compiles for
+linux/amd64 and windows/amd64 verified.
 
 ### 3. Evidence IDs prove existence, not validity (additive correctness fix)
 `validateAgentActionState` and `verifyAgentAnswer` reject out-of-range evidence IDs, but most IDs

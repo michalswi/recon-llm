@@ -201,6 +201,7 @@ func (s *agentSession) agentSnapshot() *AgentRun {
 	snapshot.Events = append([]AgentEvent(nil), s.AgentRun.Events...)
 	snapshot.CandidateHistory = append([]string(nil), s.AgentRun.CandidateHistory...)
 	snapshot.UserRequirements = append([]string(nil), s.AgentRun.UserRequirements...)
+	snapshot.Plan = clonePlanSteps(s.AgentRun.Plan)
 	return &snapshot
 }
 
@@ -948,14 +949,15 @@ func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResp
 		sess.appendAgentMessage(ChatMessage{Role: "assistant", Content: fmt.Sprintf("[Running]: %s\n[Command output]:\n%s", action.Command, output)})
 		return true
 	case "run_command_bg":
-		job, err := executeBackgroundCommand(sess.ID, action.Command)
+		run := sess.agentSnapshot()
+		if run == nil {
+			sess.appendAgentEvent(AgentEvent{Kind: "error", Action: action.Action, Text: "agent run not found"})
+			return true
+		}
+		job, err := executeBackgroundCommand(sess.ID, run.ID, action.Command)
 		if err != nil {
 			sess.appendAgentEvent(AgentEvent{Kind: "error", Action: action.Action, Text: err.Error()})
 			return true
-		}
-		if run := sess.agentSnapshot(); run != nil {
-			job.RunID = run.ID
-			jobStore.update(job)
 		}
 		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("job %s started", job.ID)})
 		return true
@@ -980,13 +982,7 @@ func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResp
 		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("job %s status: %s\n", job.ID, job.Status), Output: truncateAgentText(output)})
 		return true
 	case "cancel_job":
-		job, ok := jobStore.get(action.JobID)
-		if ok && job.SessionID == sess.ID && job.Cmd != nil && job.Cmd.Process != nil {
-			_ = job.Cmd.Process.Kill()
-			job.Status = "cancelled"
-			job.EndTime = time.Now()
-			jobStore.update(job)
-		}
+		jobStore.cancel(action.JobID, sess.ID)
 		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: "job cancellation processed"})
 		return true
 	case "list_jobs":
