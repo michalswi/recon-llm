@@ -57,7 +57,7 @@ Ordered by impact. The default rule for every item is: preserve existing success
 add characterization tests before changing behavior, and keep compatibility-sensitive policy
 changes separate from reliability fixes.
 
-### 1. Compaction can hide evidence from the critic (additive correctness fix)
+### 1. Compaction can hide evidence from the critic (additive correctness fix) — IMPLEMENTED
 `compactAgentContext` replaces older events with `ContextSummary`, but `verifyAgentAnswer` sends the
 critic only the recent uncompacted events. It does not send `ContextSummary`, and it does not pull
 in events cited by completed plan steps. A long run can therefore complete valid work, compact its
@@ -75,6 +75,16 @@ keeps directly cited observations available by event ID after compaction. Keep t
 recent-event budget for conversational history. Make fallback compaction retain the newest facts
 before advancing `CompactedThrough`. Add tests that force successful and failed compaction, cite an
 older observation, and verify that the critic receives both historical context and direct evidence.
+
+Implemented in [agent_worker.go](agent_worker.go): `verifyAgentAnswer` now inlines
+`run.ContextSummary` into the critic's user message (when non-empty) and appends
+`agentEvidenceLedger` — the events cited by completed plan steps (`agentPlanEvidenceEventIDs`),
+looked up directly from `run.Events` by ID and deduped against the recent-context window — to the
+evidence sent to the critic. `compactAgentContext`'s fallback path now calls
+`mergeAgentSummaryFallback`, which keeps the newly compacted text intact and truncates from the
+front of the older summary instead of the back, so `CompactedThrough` never advances past facts
+that were silently dropped. Covered by new tests in
+[agent_worker_test.go](agent_worker_test.go).
 
 ### 2. Background-job state has unsynchronized pointer access (additive correctness fix)
 `JobStore.get` and `listBySession` return pointers after releasing the store lock. The background

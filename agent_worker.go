@@ -647,7 +647,7 @@ func compactAgentContext(ctx context.Context, sess *agentSession) {
 	cancel()
 	summary := strings.TrimSpace(response.Content)
 	if err != nil || summary == "" {
-		summary = truncateAgentText(run.ContextSummary + "\n" + summaryInput)
+		summary = mergeAgentSummaryFallback(run.ContextSummary, summaryInput)
 	}
 	sess.mu.Lock()
 	if sess.AgentRun != nil && sess.AgentRun.ID == run.ID {
@@ -658,18 +658,79 @@ func compactAgentContext(ctx context.Context, sess *agentSession) {
 	sess.mu.Unlock()
 }
 
+// mergeAgentSummaryFallback combines a prior context summary with newly compacted
+// event text when the summarization model call fails, keeping the newest facts
+// (summaryInput) intact and truncating from the front of the older summary instead
+// of the back, so CompactedThrough never advances past facts that were dropped.
+func mergeAgentSummaryFallback(previous, newest string) string {
+	newest = truncateAgentText(newest)
+	if len(newest) >= agentMaxObservation || previous == "" {
+		return newest
+	}
+	budget := agentMaxObservation - len(newest) - len("\n")
+	if len(previous) > budget {
+		previous = previous[len(previous)-budget:]
+	}
+	return previous + "\n" + newest
+}
+
+// agentPlanEvidenceEventIDs returns the deduped, sorted set of evidence event IDs
+// cited by completed plan steps, regardless of context-compaction state.
+func agentPlanEvidenceEventIDs(plan []AgentPlanStep) []int {
+	seen := make(map[int]bool)
+	var ids []int
+	for _, step := range plan {
+		if step.Status != "completed" {
+			continue
+		}
+		for _, id := range step.EvidenceEventIDs {
+			if id > 0 && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+// agentEvidenceLedger looks up events cited by completed plan steps directly from
+// run.Events (never truncated, only excluded from the recent-context window), so
+// the critic can still inspect evidence that compaction folded into ContextSummary.
+func agentEvidenceLedger(run *AgentRun, windowed []AgentEvent) []AgentEvent {
+	inWindow := make(map[int]bool, len(windowed))
+	for _, event := range windowed {
+		inWindow[event.Sequence] = true
+	}
+	var ledger []AgentEvent
+	for _, id := range agentPlanEvidenceEventIDs(run.Plan) {
+		if id > len(run.Events) || inWindow[id] {
+			continue
+		}
+		ledger = append(ledger, run.Events[id-1])
+	}
+	return ledger
+}
+
 func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string) (AgentVerification, error) {
 	run := sess.agentSnapshot()
 	if run == nil {
 		return AgentVerification{}, errors.New("agent run not found")
 	}
-	evidence := agentCriticEvidence(selectAgentContextEvents(run.Events, run.CompactedThrough, agentContextTokens))
+	windowed := selectAgentContextEvents(run.Events, run.CompactedThrough, agentContextTokens)
+	evidence := agentCriticEvidence(windowed)
+	evidence = append(evidence, agentEvidenceLedger(run, windowed)...)
 	evidenceJSON, _ := json.Marshal(evidence)
 	planJSON, _ := json.Marshal(run.Plan)
 	revisionContext := agentRevisionContext(run)
+	userContent := agentGoalDescription(run) + "\n\nREVISION CONTEXT:\n" + revisionContext + "\n\nPLAN:\n" + string(planJSON)
+	if run.ContextSummary != "" {
+		userContent += "\n\nEARLIER RUN SUMMARY:\n" + run.ContextSummary
+	}
+	userContent += "\n\nCANDIDATE ANSWER:\n" + candidate + "\n\nRECORDED EVENTS:\n" + string(evidenceJSON)
 	messages := []ChatMessage{
 		{Role: "system", Content: "You are an independent critic. Verify the exact candidate agent-agent answer against the objective, expected output, constraints, completion criteria, plan, user feedback, and recorded events. Approve only if the candidate itself contains the complete requested deliverable. Never assume promised, described, or omitted content exists; a preamble without its claimed output is incomplete. Return exactly one JSON object: {\"approved\":true|false,\"feedback\":\"specific reason or empty\",\"evidenceEventIds\":[1,2]}. Cite only event IDs that directly support the answer. Knowledge-only answers may use an empty evidence list."},
-		{Role: "user", Content: agentGoalDescription(run) + "\n\nREVISION CONTEXT:\n" + revisionContext + "\n\nPLAN:\n" + string(planJSON) + "\n\nCANDIDATE ANSWER:\n" + candidate + "\n\nRECORDED EVENTS:\n" + string(evidenceJSON), Images: agentImages(sess)},
+		{Role: "user", Content: userContent, Images: agentImages(sess)},
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
 	response, err := callOllamaMessageWithLogContext(verifyCtx, "agent-critic:"+run.ID, messages, true, false)
