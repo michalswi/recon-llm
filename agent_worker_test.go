@@ -210,3 +210,102 @@ func TestVerifyAgentAnswerIncludesSummaryAndCompactedLedgerEvidence(t *testing.T
 	}
 }
 
+func TestAgentEvidenceEventIsValid(t *testing.T) {
+	cases := []struct {
+		name  string
+		event AgentEvent
+		want  bool
+	}{
+		{"successful run_command", AgentEvent{Kind: "observation", Action: "run_command", Success: true}, true},
+		{"failed run_command", AgentEvent{Kind: "observation", Action: "run_command", Success: false}, false},
+		{"successful list_directory", AgentEvent{Kind: "observation", Action: "list_directory", Success: true}, true},
+		{"failed search_files", AgentEvent{Kind: "observation", Action: "search_files", Success: false}, false},
+		{"run_command_bg start", AgentEvent{Kind: "observation", Action: "run_command_bg", Success: false}, true},
+		{"get_job completed", AgentEvent{Kind: "observation", Action: "get_job", Text: "job job_1 status: completed\n"}, true},
+		{"check_job running", AgentEvent{Kind: "observation", Action: "check_job", Text: "job job_1 status: running\n"}, false},
+		{"cancel_job", AgentEvent{Kind: "observation", Action: "cancel_job"}, true},
+		{"list_jobs", AgentEvent{Kind: "observation", Action: "list_jobs"}, true},
+		{"update_findings", AgentEvent{Kind: "observation", Action: "update_findings"}, true},
+		{"feedback", AgentEvent{Kind: "feedback"}, true},
+		{"plan", AgentEvent{Kind: "plan"}, true},
+		{"action (stated intent)", AgentEvent{Kind: "action", Action: "run_command"}, false},
+		{"invalid_action", AgentEvent{Kind: "invalid_action"}, false},
+		{"candidate", AgentEvent{Kind: "candidate"}, false},
+		{"answer", AgentEvent{Kind: "answer"}, false},
+		{"verification", AgentEvent{Kind: "verification"}, false},
+		{"clarification", AgentEvent{Kind: "clarification"}, false},
+		{"status", AgentEvent{Kind: "status"}, false},
+		{"error", AgentEvent{Kind: "error"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := agentEvidenceEventIsValid(tc.event); got != tc.want {
+				t.Fatalf("agentEvidenceEventIsValid(%#v) = %v, want %v", tc.event, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateAgentActionStateRejectsInvalidCompleteStepEvidence(t *testing.T) {
+	sess := &agentSession{ID: "sess1"}
+	run := &AgentRun{
+		ID: "run1",
+		Events: []AgentEvent{
+			{Sequence: 1, Kind: "observation", Action: "run_command", Success: false},
+		},
+		Plan: []AgentPlanStep{{ID: 1, Status: "pending"}},
+	}
+	action := ToolResponse{Action: "complete_step", StepID: 1, EvidenceEventIDs: []int{1}}
+	if err := validateAgentActionState(sess, run, action); err == nil {
+		t.Fatal("expected complete_step citing a failed command observation to be rejected")
+	}
+}
+
+func TestValidateAgentActionStateAcceptsValidCompleteStepEvidence(t *testing.T) {
+	sess := &agentSession{ID: "sess1"}
+	run := &AgentRun{
+		ID: "run1",
+		Events: []AgentEvent{
+			{Sequence: 1, Kind: "observation", Action: "run_command", Success: true},
+		},
+		Plan: []AgentPlanStep{{ID: 1, Status: "pending"}},
+	}
+	action := ToolResponse{Action: "complete_step", StepID: 1, EvidenceEventIDs: []int{1}}
+	if err := validateAgentActionState(sess, run, action); err != nil {
+		t.Fatalf("expected complete_step citing a successful observation to be accepted, got: %v", err)
+	}
+}
+
+func TestVerifyAgentAnswerRejectsCriticEvidenceThatCannotProveIt(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":true,"feedback":"","evidenceEventIds":[1]}`}})
+	}))
+	defer ollama.Close()
+	previousOllamaURL := ollamaURL
+	ollamaURL = ollama.URL
+	t.Cleanup(func() { ollamaURL = previousOllamaURL })
+
+	sess := &agentSession{
+		ID: "sess-critic-invalid",
+		AgentRun: &AgentRun{
+			ID:       "run-critic-invalid",
+			GoalSpec: normalizeAgentGoalSpec(AgentGoalSpec{Objective: "produce a report"}),
+			Events: []AgentEvent{
+				{Sequence: 1, Kind: "observation", Action: "run_command", Success: false},
+			},
+		},
+	}
+
+	verification, err := verifyAgentAnswer(context.Background(), sess, "final report text")
+	if err != nil {
+		t.Fatalf("verifyAgentAnswer returned error: %v", err)
+	}
+	if verification.Approved {
+		t.Fatal("expected approval to be downgraded when the critic cites a failed observation as evidence")
+	}
+	if verification.Feedback == "" {
+		t.Fatal("expected feedback explaining the rejected evidence")
+	}
+}
+
+

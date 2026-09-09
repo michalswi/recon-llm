@@ -124,7 +124,7 @@ cancel-not-overwritten, wrong-session cancel rejection, session-scoped listing, 
 `-race` check, plan/snapshot deep-copy isolation). Full suite + `-race` pass; cross-compiles for
 linux/amd64 and windows/amd64 verified.
 
-### 3. Evidence IDs prove existence, not validity (additive correctness fix)
+### 3. Evidence IDs prove existence, not validity (additive correctness fix) — IMPLEMENTED
 `validateAgentActionState` and `verifyAgentAnswer` reject out-of-range evidence IDs, but most IDs
 are not checked for evidence type, successful outcome, or relationship to the claim. A completed
 step or critic can therefore cite a failed command, an invalid action, or an unrelated event. The
@@ -139,10 +139,27 @@ code and leave semantic relevance to the critic. This preserves legitimate non-c
 while rejecting structurally impossible proof. Add negative tests for failed, error, candidate,
 and unrelated lifecycle events, plus positive tests for every supported evidence-producing action.
 
+Implemented in [agent_worker.go](agent_worker.go): new `agentEvidenceEventIsValid` applies a
+deterministic per-action policy — `run_command`/`list_directory`/`search_files` observations must
+have `Success == true`; `run_command_bg` observations are always valid (they only ever claim a job
+started); `check_job`/`get_job` observations are valid only when the embedded job status (parsed
+via `agentJobObservationStatus`) is not `"running"` (a terminal snapshot proves a final result, an
+in-progress one proves nothing yet); `cancel_job`/`list_jobs`/`update_findings` observations,
+`feedback`, and `plan` events are always valid; every other kind (`action`, `invalid_action`,
+`candidate`, `answer`, `verification`, `clarification`, `status`, `error`) is never valid evidence.
+`validateAgentActionState`'s `complete_step` check and `verifyAgentAnswer`'s post-approval evidence
+check both now call this policy — an invalid citation in `complete_step` is rejected the same way
+as a nonexistent one, and an invalid citation from the critic downgrades approval to a revision
+(clear feedback) rather than an error, consistent with the existing required-command rejection
+path. Covered by new tests in [agent_worker_test.go](agent_worker_test.go) (table test over every
+event kind/action combination, `complete_step` accept/reject, and an httptest-based critic
+downgrade test). Full suite + `-race` pass.
+
 ### 4. Model-call failures always consume the 3-strike budget (additive availability fix)
 `recordAgentFailure` treats a transient network blip, a request timeout, an Ollama 5xx response,
 and a genuinely invalid model response identically. A flaky endpoint can burn all 3 strikes even
 though the agent's reasoning never ran.
+
 
 Preserving fix: retry only clearly transient transport failures and HTTP 429/5xx responses with a
 small capped backoff before incrementing `ConsecutiveErrors`. Keep parse, schema, state-validation,

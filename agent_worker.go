@@ -570,6 +570,9 @@ func validateAgentActionState(sess *agentSession, run *AgentRun, action ToolResp
 			if eventID <= 0 || eventID > len(run.Events) {
 				return fmt.Errorf("evidence event %d does not exist", eventID)
 			}
+			if event := run.Events[eventID-1]; !agentEvidenceEventIsValid(event) {
+				return fmt.Errorf("evidence event %d (%s/%s) cannot prove this step; cite a successful observation, a terminal job snapshot, or user feedback", eventID, event.Kind, event.Action)
+			}
 		}
 	}
 	return nil
@@ -759,6 +762,15 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 			return AgentVerification{}, fmt.Errorf("critic cited nonexistent event %d", eventID)
 		}
 	}
+	if verification.Approved {
+		for _, eventID := range verification.EvidenceEventIDs {
+			if event := run.Events[eventID-1]; !agentEvidenceEventIsValid(event) {
+				verification.Approved = false
+				verification.Feedback = fmt.Sprintf("cited event %d (%s/%s) cannot prove the answer; cite a successful observation, a terminal job snapshot, or user feedback instead", eventID, event.Kind, event.Action)
+				break
+			}
+		}
+	}
 	if command := requiredGoalCommand(run); verification.Approved && command != "" && !evidenceSupportsCommand(run.Events, verification.EvidenceEventIDs, command) {
 		verification.Approved = false
 		verification.Feedback = fmt.Sprintf("candidate does not cite a successful %q observation", command)
@@ -810,6 +822,58 @@ func evidenceSupportsCommand(events []AgentEvent, evidenceIDs []int, command str
 		}
 	}
 	return false
+}
+
+var agentJobObservationStatusPattern = regexp.MustCompile(`status: (\w+)`)
+
+// agentJobObservationStatus extracts the job status embedded in a check_job/get_job
+// observation's Text (see the "job %s status: %s" format in executeAgentAction).
+func agentJobObservationStatus(text string) (string, bool) {
+	match := agentJobObservationStatusPattern.FindStringSubmatch(text)
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
+// agentEvidenceEventIsValid applies a deterministic, per-action evidence policy so
+// citing an event can only prove what that event actually recorded. Semantic
+// relevance to a specific claim (does this evidence actually support THIS answer
+// or step) is left to the critic and to plan review; this only rejects citations
+// that are structurally impossible proof (a failed observation, a rejected draft,
+// an error, or the model's own stated intent).
+func agentEvidenceEventIsValid(event AgentEvent) bool {
+	switch event.Kind {
+	case "observation":
+		switch event.Action {
+		case "run_command", "list_directory", "search_files":
+			// A successful foreground/native observation can prove its own result;
+			// a failed one proves nothing positive.
+			return event.Success
+		case "run_command_bg":
+			// A background start can prove only that a job started, not its outcome.
+			return true
+		case "check_job", "get_job":
+			// A job snapshot can prove a final result only once the job reached a
+			// terminal state; "running" proves nothing about the eventual outcome.
+			status, ok := agentJobObservationStatus(event.Text)
+			return ok && status != "running"
+		case "cancel_job", "list_jobs", "update_findings":
+			return true
+		default:
+			return false
+		}
+	case "feedback":
+		// User feedback can prove a stated requirement, not command execution.
+		return true
+	case "plan":
+		return true
+	default:
+		// "action" (stated intent), "invalid_action", "candidate", "answer",
+		// "verification", "clarification", "status", and "error" events record
+		// intent, rejection, or failure — never structurally valid proof of a claim.
+		return false
+	}
 }
 
 func parseAgentAction(raw string) (ToolResponse, error) {
