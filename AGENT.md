@@ -208,6 +208,34 @@ the process exits between model selection and execution. Do not batch or remove 
 without a crash-consistency test proving that command intent and resulting evidence remain
 auditable. Optimize only if profiling shows this is material.
 
+### 10. No coordination between multiple simultaneously running agent instances [toreview]
+Today, "many instances" only works in the sense that separate `recon` processes (or separate runs
+within one API process) don't share in-memory state and therefore can't corrupt each other's
+worker loop, job store, or run registry — confirmed safe after the #1/#2 fixes above. But there is
+no actual cooperation model: each instance/run is fully independent and unaware of any other.
+
+Concretely, running several instances (or agents) at once today means:
+- No shared work queue, locking, or leader election — two instances can be pointed at the same
+  target/goal and duplicate all work with no visibility into each other.
+- No cross-instance handoff of findings, plans, or evidence; `ContextSummary`/plan/evidence all
+  live only inside one run's `AgentRun`, so one agent cannot delegate a sub-task to another or
+  merge results.
+- Shared filesystem resources are not coordinated: `~/.recon/history` (terminal only) is appended
+  without any lock, and nothing prevents two instances from being pointed at the same attachment
+  path or output location concurrently.
+- `agentAPI.runs` (see #7) and `jobStore` are process-local, so a load balancer or process
+  supervisor cannot see or manage runs/jobs started in a sibling process — there is no shared
+  registry an orchestrator could query across instances.
+- Command execution has no per-target concurrency control, so nothing stops two instances from
+  running conflicting or redundant commands (e.g. two `nmap` scans, or two writers to the same
+  file) against the same host at the same time.
+
+This item is flagged for review only — it changes the product's scope (single-agent orchestrator
+today vs. a coordinated multi-agent system) rather than fixing a bug, so it needs an explicit
+decision on the desired cooperation model (e.g. shared run registry service, message-passing
+between agents, target-level locking, or simply documenting that multi-instance use requires
+external coordination) before any implementation is proposed.
+
 ## Test gaps to close first
 
 Current tests cover the API clarification/approval lifecycle, attachment propagation, native
