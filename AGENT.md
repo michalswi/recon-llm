@@ -27,9 +27,9 @@ One iteration of `runAgent` ([agent_worker.go](agent_worker.go)):
    (`verifyAgentAnswer`) with its own JSON schema, plan-completion check, and evidence-ID
    validation. Rejection becomes revision context; approval hands control to the terminal/API for
    user accept/revise/stop.
-9. Execute the tool (`executeAgentAction`) — shell command, background job, job inspection,
-   native `list_directory`/`search_files`, plan mutation, findings — append an event, persist to
-   `~/.recon/agent_runs/<id>.json`.
+9. Append the selected action and persist it, execute the tool (`executeAgentAction`) — shell
+  command, background job, job inspection, native `list_directory`/`search_files`, plan mutation,
+  findings — append its resulting event, then persist again to `~/.recon/agent_runs/<id>.json`.
 10. Repeat, up to 30 iterations / 30 minutes, with a 3-consecutive-failure kill switch.
 
 Command execution goes through an allowlist (`comm.go`) checked per `|`/`;`/`&`-separated segment
