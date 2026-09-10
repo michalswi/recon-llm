@@ -1,7 +1,14 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,3 +150,118 @@ func TestAgentSnapshotPlanIsIsolatedFromConcurrentMutation(t *testing.T) {
 		t.Fatalf("snapshot's evidence IDs must not share the live plan's backing array, got %v", snapshot.Plan[0].EvidenceEventIDs)
 	}
 }
+
+func TestIsRetryableOllamaTransportError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"429 too many requests", &ollamaHTTPStatusError{StatusCode: 429, Status: "429 Too Many Requests"}, true},
+		{"500 internal server error", &ollamaHTTPStatusError{StatusCode: 500, Status: "500 Internal Server Error"}, true},
+		{"503 service unavailable", &ollamaHTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable"}, true},
+		{"400 bad request", &ollamaHTTPStatusError{StatusCode: 400, Status: "400 Bad Request"}, false},
+		{"404 not found", &ollamaHTTPStatusError{StatusCode: 404, Status: "404 Not Found"}, false},
+		{"network error", &url.Error{Op: "Post", URL: "http://x", Err: errors.New("connection refused")}, true},
+		{"generic non-transport error", errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableOllamaTransportError(tc.err); got != tc.want {
+				t.Fatalf("isRetryableOllamaTransportError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func withTestOllamaServer(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	previousURL := ollamaURL
+	ollamaURL = server.URL
+	t.Cleanup(func() { ollamaURL = previousURL })
+}
+
+func withFastRetryBackoff(t *testing.T, backoff time.Duration) {
+	t.Helper()
+	previous := ollamaRetryBaseBackoff
+	ollamaRetryBaseBackoff = backoff
+	t.Cleanup(func() { ollamaRetryBaseBackoff = previous })
+}
+
+func TestCallOllamaMessageWithRetrySucceedsAfterTransientServerError(t *testing.T) {
+	withFastRetryBackoff(t, time.Millisecond)
+	var calls int32
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: "ok"}})
+	})
+
+	message, err := callOllamaMessageWithRetry(context.Background(), "test", []ChatMessage{{Role: "user", Content: "hi"}}, false, false)
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got error: %v", err)
+	}
+	if message.Content != "ok" {
+		t.Fatalf("unexpected message: %#v", message)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected exactly 2 attempts (1 failure + 1 success), got %d", got)
+	}
+}
+
+func TestCallOllamaMessageWithRetryDoesNotRetryDeterministic4xx(t *testing.T) {
+	var calls int32
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+	})
+
+	if _, err := callOllamaMessageWithRetry(context.Background(), "test", []ChatMessage{{Role: "user", Content: "hi"}}, false, false); err == nil {
+		t.Fatal("expected an error for a deterministic 400 response")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected exactly 1 attempt for a non-retryable error, got %d", got)
+	}
+}
+
+func TestCallOllamaMessageWithRetryExhaustsAttemptsOnPersistentFailure(t *testing.T) {
+	withFastRetryBackoff(t, time.Millisecond)
+	var calls int32
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	if _, err := callOllamaMessageWithRetry(context.Background(), "test", []ChatMessage{{Role: "user", Content: "hi"}}, false, false); err == nil {
+		t.Fatal("expected an error after exhausting all retry attempts")
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected exactly 3 attempts (max), got %d", got)
+	}
+}
+
+func TestCallOllamaMessageWithRetryStopsAfterCancellation(t *testing.T) {
+	withFastRetryBackoff(t, 200*time.Millisecond)
+	var calls int32
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := callOllamaMessageWithRetry(ctx, "test", []ChatMessage{{Role: "user", Content: "hi"}}, false, false); err == nil {
+		t.Fatal("expected an error once the context is cancelled")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected exactly 1 attempt before cancellation interrupted the backoff, got %d", got)
+	}
+}
+

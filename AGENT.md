@@ -155,17 +155,36 @@ path. Covered by new tests in [agent_worker_test.go](agent_worker_test.go) (tabl
 event kind/action combination, `complete_step` accept/reject, and an httptest-based critic
 downgrade test). Full suite + `-race` pass.
 
-### 4. Model-call failures always consume the 3-strike budget (additive availability fix)
+### 4. Model-call failures always consume the 3-strike budget (additive availability fix) — IMPLEMENTED
 `recordAgentFailure` treats a transient network blip, a request timeout, an Ollama 5xx response,
 and a genuinely invalid model response identically. A flaky endpoint can burn all 3 strikes even
 though the agent's reasoning never ran.
-
 
 Preserving fix: retry only clearly transient transport failures and HTTP 429/5xx responses with a
 small capped backoff before incrementing `ConsecutiveErrors`. Keep parse, schema, state-validation,
 and deterministic 4xx failures on the existing immediate failure path. Respect the enclosing
 30-minute run deadline and cancellation on every retry; do not retry after cancellation. Tests
 should use an `httptest` server, not timing-sensitive access to a real Ollama instance.
+
+Implemented in [runtime.go](runtime.go): non-2xx Ollama responses now return a typed
+`ollamaHTTPStatusError{StatusCode, Status}` instead of a bare formatted error. New
+`isRetryableOllamaTransportError` classifies only HTTP 429/5xx responses and `*url.Error` (network
+dial failures, TLS errors, and the per-attempt request timeout) as retryable; any other 4xx or an
+undecodable response body is left on the immediate-failure path, unchanged. New
+`callOllamaMessageWithRetry(ctx, ...)` wraps `callOllamaMessageWithLogContext` with up to 3 attempts
+and a capped exponential backoff (`ollamaRetryBaseBackoff`, doubling each attempt): it takes the
+caller's own outer context directly (not a pre-wrapped one) and derives a fresh per-attempt
+`agentModelTimeout` deadline from it on every attempt, so a single slow attempt doesn't shrink the
+budget available to a retry; it never retries once the outer context is done (run deadline or
+cancellation), and the backoff sleep itself is interrupted by that same context. All three model
+call sites in [agent_worker.go](agent_worker.go) — the main iteration loop, `verifyAgentAnswer`,
+and `compactAgentContext`'s fallback summary call — now go through this wrapper instead of calling
+`callOllamaMessageWithLogContext` directly, so a flaky endpoint no longer burns a strike (or forces
+a premature compaction fallback) before the agent's own reasoning ever ran. Covered by new tests in
+[runtime_test.go](runtime_test.go) using `httptest` servers (no real Ollama, no fixed sleeps other
+than a test-overridable `ollamaRetryBaseBackoff`): retry-classification table test, succeed-after-
+one-transient-failure, no-retry-on-deterministic-4xx, exhausts-all-3-attempts-then-fails, and
+cancellation-interrupts-backoff. Full suite + `-race` pass.
 
 ### 5. `sh` and `xargs` sit in the command allowlist and can bypass it entirely (behavior change — needs a decision)
 `comm.go` allows `sh`. `validateAgentCommand` only inspects the first word of each

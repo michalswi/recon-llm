@@ -272,9 +272,7 @@ func runAgent(ctx context.Context, sess *agentSession) {
 			finishAgent(sess, agentFailed, "", err.Error())
 			return
 		}
-		modelCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
-		response, err := callOllamaMessageWithLogContext(modelCtx, "agent:"+run.ID, messages, true, sess.ThinkingEnabled)
-		cancel()
+		response, err := callOllamaMessageWithRetry(ctx, "agent:"+run.ID, messages, true, sess.ThinkingEnabled)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -646,9 +644,7 @@ func compactAgentContext(ctx context.Context, sess *agentSession) {
 		{Role: "system", Content: fmt.Sprintf("Summarize agent-agent history in at most %d tokens. Preserve verified facts, failed approaches, unresolved questions, user constraints, and job IDs. Do not invent information.", agentSummaryTokens)},
 		{Role: "user", Content: "Existing summary:\n" + emptyAgentValue(run.ContextSummary) + "\n\nEvents to compact:\n" + summaryInput},
 	}
-	summaryCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
-	response, err := callOllamaMessageWithLogContext(summaryCtx, "agent-summary:"+run.ID, summaryMessages, false, false)
-	cancel()
+	response, err := callOllamaMessageWithRetry(ctx, "agent-summary:"+run.ID, summaryMessages, false, false)
 	summary := strings.TrimSpace(response.Content)
 	if err != nil || summary == "" {
 		summary = mergeAgentSummaryFallback(run.ContextSummary, summaryInput)
@@ -736,9 +732,7 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 		{Role: "system", Content: "You are an independent critic. Verify the exact candidate agent-agent answer against the objective, expected output, constraints, completion criteria, plan, user feedback, and recorded events. Approve only if the candidate itself contains the complete requested deliverable. Never assume promised, described, or omitted content exists; a preamble without its claimed output is incomplete. Return exactly one JSON object: {\"approved\":true|false,\"feedback\":\"specific reason or empty\",\"evidenceEventIds\":[1,2]}. Cite only event IDs that directly support the answer. Knowledge-only answers may use an empty evidence list."},
 		{Role: "user", Content: userContent, Images: agentImages(sess)},
 	}
-	verifyCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
-	response, err := callOllamaMessageWithLogContext(verifyCtx, "agent-critic:"+run.ID, messages, true, false)
-	cancel()
+	response, err := callOllamaMessageWithRetry(ctx, "agent-critic:"+run.ID, messages, true, false)
 	if err != nil {
 		return AgentVerification{}, err
 	}

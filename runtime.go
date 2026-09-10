@@ -449,13 +449,75 @@ func callOllamaMessageContext(ctx context.Context, messages []ChatMessage, force
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return ChatMessage{}, fmt.Errorf("ollama returned %s", response.Status)
+		return ChatMessage{}, &ollamaHTTPStatusError{StatusCode: response.StatusCode, Status: response.Status}
 	}
 	var chatResponse ChatResponse
 	if err := json.NewDecoder(response.Body).Decode(&chatResponse); err != nil {
 		return ChatMessage{}, err
 	}
 	return chatResponse.Message, nil
+}
+
+// ollamaHTTPStatusError carries the HTTP status code from a non-2xx Ollama
+// response so callers can distinguish a retryable rate-limit/server error
+// (429/5xx) from a deterministic client error (any other 4xx).
+type ollamaHTTPStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e *ollamaHTTPStatusError) Error() string {
+	return fmt.Sprintf("ollama returned %s", e.Status)
+}
+
+// isRetryableOllamaTransportError reports whether err is a transient transport
+// failure (network error, request timeout) or an HTTP 429/5xx response — the
+// only classes of Ollama call failure worth retrying. Deterministic 4xx
+// responses and undecodable response bodies are not retried; those represent a
+// genuinely invalid request or response, not a transient blip.
+func isRetryableOllamaTransportError(err error) bool {
+	var statusErr *ollamaHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode == http.StatusTooManyRequests || statusErr.StatusCode >= 500
+	}
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
+// ollamaRetryBaseBackoff is the initial backoff before the first retry,
+// doubling each subsequent attempt; overridable in tests to avoid real delays.
+var ollamaRetryBaseBackoff = 500 * time.Millisecond
+
+// callOllamaMessageWithRetry retries callOllamaMessageWithLogContext for
+// transient transport failures and HTTP 429/5xx responses only, with a small
+// capped backoff, so a flaky endpoint doesn't consume the agent's 3-strike
+// failure budget before its reasoning ever ran. ctx is the caller's own
+// deadline/cancellation (e.g. the run's 30-minute budget): a retry is never
+// attempted once ctx is done, and the backoff sleep itself is interruptible by
+// ctx, so cancellation always wins over a pending retry.
+func callOllamaMessageWithRetry(ctx context.Context, origin string, messages []ChatMessage, forceJSON, think bool) (ChatMessage, error) {
+	const maxAttempts = 3
+	backoff := ollamaRetryBaseBackoff
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
+		message, err := callOllamaMessageWithLogContext(attemptCtx, origin, messages, forceJSON, think)
+		cancel()
+		if err == nil {
+			return message, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt == maxAttempts || !isRetryableOllamaTransportError(err) {
+			return ChatMessage{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return ChatMessage{}, lastErr
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return ChatMessage{}, lastErr
 }
 
 func callOllamaWithLogContext(ctx context.Context, origin string, messages []ChatMessage, forceJSON bool) (string, error) {
