@@ -947,6 +947,152 @@ func validateAgentCommand(command string) error {
 			return fmt.Errorf("command %q is not allowed", fields[0])
 		}
 	}
+	return validateShAndXargsInvocations(command)
+}
+
+// tokenizeShellWords splits a command string into shell words, honoring single
+// and double quotes (so a quoted argument containing spaces or operators stays
+// one word) and backslash escapes outside single quotes. It is intentionally
+// not a full POSIX shell parser (no variable expansion, command substitution —
+// already rejected above — or here-docs); it exists only to find argument
+// boundaries reliably enough to re-validate what "sh"/"xargs" invoke below.
+func tokenizeShellWords(command string) ([]string, error) {
+	var words []string
+	var current strings.Builder
+	hasCurrent := false
+	runes := []rune(command)
+	index := 0
+	for index < len(runes) {
+		switch r := runes[index]; r {
+		case '\'':
+			hasCurrent = true
+			index++
+			start := index
+			for index < len(runes) && runes[index] != '\'' {
+				index++
+			}
+			if index >= len(runes) {
+				return nil, errors.New("unterminated single quote")
+			}
+			current.WriteString(string(runes[start:index]))
+			index++
+		case '"':
+			hasCurrent = true
+			index++
+			for index < len(runes) && runes[index] != '"' {
+				if runes[index] == '\\' && index+1 < len(runes) && (runes[index+1] == '"' || runes[index+1] == '\\') {
+					index++
+				}
+				current.WriteRune(runes[index])
+				index++
+			}
+			if index >= len(runes) {
+				return nil, errors.New("unterminated double quote")
+			}
+			index++
+		case '\\':
+			if index+1 < len(runes) {
+				current.WriteRune(runes[index+1])
+				hasCurrent = true
+				index += 2
+			} else {
+				index++
+			}
+		case ' ', '\t':
+			if hasCurrent {
+				words = append(words, current.String())
+				current.Reset()
+				hasCurrent = false
+			}
+			index++
+		default:
+			current.WriteRune(r)
+			hasCurrent = true
+			index++
+		}
+	}
+	if hasCurrent {
+		words = append(words, current.String())
+	}
+	return words, nil
+}
+
+// shScriptArgument returns the script text following "sh -c", the only "sh"
+// invocation this validator can prove safe; any other usage (no -c, or -c
+// combined with other short flags) is rejected since its effect can't be
+// re-validated against the allowlist.
+func shScriptArgument(rest []string) (string, bool) {
+	if len(rest) < 2 || rest[0] != "-c" {
+		return "", false
+	}
+	return rest[1], true
+}
+
+// xargsValueFlags lists xargs options that consume the next token as their
+// value when given as a separate argument (e.g. "-I {}" rather than "-I{}").
+var xargsValueFlags = map[string]bool{
+	"-I": true, "-i": true, "-n": true, "-P": true, "-L": true,
+	"-l": true, "-s": true, "-d": true, "-a": true, "-E": true, "-e": true,
+}
+
+// xargsCommandOffset finds the index within rest of the first non-option
+// token — the command xargs will actually invoke — skipping xargs' own flags
+// (and, for flags in xargsValueFlags, their separate value argument too).
+func xargsCommandOffset(rest []string) (int, bool) {
+	for index := 0; index < len(rest); index++ {
+		if strings.HasPrefix(rest[index], "-") {
+			if xargsValueFlags[rest[index]] {
+				index++
+			}
+			continue
+		}
+		return index, true
+	}
+	return 0, false
+}
+
+// validateShAndXargsInvocations re-validates whatever "sh -c" or "xargs" would
+// actually run against the same command allowlist. Both are themselves
+// allowlisted (needed for legitimate multi-command workflows), but without
+// this check either could run anything unchecked, making the allowlist not a
+// real boundary. Scans every occurrence in the command, not just the first, and
+// re-checks nested forms (e.g. "xargs sh -c \"...\"") the same way as a
+// top-level command.
+func validateShAndXargsInvocations(command string) error {
+	words, err := tokenizeShellWords(command)
+	if err != nil {
+		return fmt.Errorf("could not parse command for sh/xargs validation: %w", err)
+	}
+	return validateShAndXargsWords(words)
+}
+
+func validateShAndXargsWords(words []string) error {
+	for index := 0; index < len(words); index++ {
+		switch words[index] {
+		case "sh":
+			script, ok := shScriptArgument(words[index+1:])
+			if !ok {
+				return errors.New(`"sh" is only allowed as sh -c "<command>"`)
+			}
+			if err := validateAgentCommand(script); err != nil {
+				return fmt.Errorf("sh -c script rejected: %w", err)
+			}
+			index += 2 // skip "-c" and the script argument just validated
+		case "xargs":
+			rest := words[index+1:]
+			offset, ok := xargsCommandOffset(rest)
+			if !ok {
+				return errors.New(`"xargs" must be followed by an allowlisted command`)
+			}
+			target := rest[offset]
+			if !allowedCommands[target] {
+				return fmt.Errorf("xargs target command %q is not allowed", target)
+			}
+			// Land on the target token itself next iteration, so a nested
+			// "sh"/"xargs" target gets the same re-validation as a top-level one.
+			index += offset
+		}
+	}
 	return nil
 }
 

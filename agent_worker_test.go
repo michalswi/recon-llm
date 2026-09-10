@@ -308,4 +308,71 @@ func TestVerifyAgentAnswerRejectsCriticEvidenceThatCannotProveIt(t *testing.T) {
 	}
 }
 
+func TestValidateAgentCommandCharacterizationOfExistingAcceptedForms(t *testing.T) {
+	accepted := []string{
+		`ls -la`,
+		`cat file.txt | grep foo`,
+		`echo a; echo b`,
+		`ping -c 1 example.com &`,
+		`grep "foo bar" file.txt`,
+		`echo 'hello world'`,
+	}
+	for _, command := range accepted {
+		t.Run(command, func(t *testing.T) {
+			if err := validateAgentCommand(command); err != nil {
+				t.Fatalf("expected %q to be accepted, got error: %v", command, err)
+			}
+		})
+	}
+
+	rejected := []string{
+		`rm -rf /`,
+		`/bin/ls`,
+	}
+	for _, command := range rejected {
+		t.Run(command, func(t *testing.T) {
+			if err := validateAgentCommand(command); err == nil {
+				t.Fatalf("expected %q to be rejected", command)
+			}
+		})
+	}
+}
+
+func TestValidateAgentCommandShAndXargsReValidateTheirTarget(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		wantErr bool
+	}{
+		{"sh -c with allowlisted script", `sh -c "cat /etc/passwd"`, false},
+		{"sh -c with disallowed script", `sh -c "rm -rf /"`, true},
+		{"bare sh with no -c", `sh`, true},
+		{"sh -s is not the safe form", `sh -s`, true},
+		{"xargs with allowlisted target", `xargs cat`, false},
+		{"xargs with disallowed target", `xargs rm`, true},
+		{"pipeline into xargs allowlisted target", `find . -name "*.txt" | xargs cat`, false},
+		{"pipeline into xargs disallowed target", `find . -name "*.txt" | xargs rm`, true},
+		{"xargs value flag then allowlisted target", `find . | xargs -n 1 cat`, false},
+		{"xargs value flag then disallowed target", `find . | xargs -n 1 rm`, true},
+		{"xargs attached flag then allowlisted target", `find . | xargs -I{} cat {}`, false},
+		{"nested xargs invoking sh -c disallowed", `xargs sh -c "rm -rf /"`, true},
+		{"nested sh -c invoking xargs disallowed", `sh -c "xargs rm"`, true},
+		{"second sh -c on the same line is disallowed", `sh -c "ls" && sh -c "rm -rf /"`, true},
+		{"second sh -c on the same line is allowed", `sh -c "ls" && sh -c "cat /etc/passwd"`, false},
+		{"unterminated quote is rejected", `echo "unterminated`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAgentCommand(tc.command)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected %q to be rejected", tc.command)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected %q to be accepted, got error: %v", tc.command, err)
+			}
+		})
+	}
+}
+
+
 

@@ -186,7 +186,7 @@ than a test-overridable `ollamaRetryBaseBackoff`): retry-classification table te
 one-transient-failure, no-retry-on-deterministic-4xx, exhausts-all-3-attempts-then-fails, and
 cancellation-interrupts-backoff. Full suite + `-race` pass.
 
-### 5. `sh` and `xargs` sit in the command allowlist and can bypass it entirely (behavior change — needs a decision)
+### 5. `sh` and `xargs` sit in the command allowlist and can bypass it entirely (behavior change — needs a decision) — IMPLEMENTED
 `comm.go` allows `sh`. `validateAgentCommand` only inspects the first word of each
 `|`/`;`/`&`-separated segment, so `sh -c "<anything>"` passes validation and then `bash -c` runs
 whatever `sh -c` was given, completely unchecked against the allowlist. `xargs <command>` has the
@@ -205,6 +205,36 @@ separators inside quoted arguments can be misread as new commands. If command po
 use a real shell parser and characterization tests for every currently supported form rather than
 adding more string splitting. Do not remove `sh`, `xargs`, quoting, pipelines, redirections, or
 other accepted forms as part of an unrelated reliability change.
+
+Decision (asked, 2026-09-10): keep `sh -c`/`xargs` usable and re-validate the command they actually
+invoke, instead of removing them or only documenting the gap. Implemented in
+[agent_worker.go](agent_worker.go): new `tokenizeShellWords` splits a command into shell words,
+honoring single/double quotes (so a quoted argument stays one word) and backslash escapes — enough
+to reliably find argument boundaries without being a full POSIX parser (no expansion, substitution,
+or here-docs; command substitution was already rejected earlier in `validateAgentCommand`).
+`validateShAndXargsInvocations`/`validateShAndXargsWords` scan every word in the command (not just
+the first `sh`/`xargs` occurrence — an earlier draft stopped at the first match and missed a second
+one later on the same line, e.g. `sh -c "ls" && sh -c "rm -rf /"`, caught by a test) and, for each
+occurrence:
+- `sh` is only accepted as `sh -c "<script>"`; the script is recursively re-validated through
+  `validateAgentCommand` itself, so pipelines/chains/nested `sh`/`xargs` inside the script get the
+  same treatment. Any other `sh` usage (bare `sh`, `sh -s`, etc.) is rejected — its effect can't be
+  proven safe.
+- `xargs` has its target command found via `xargsCommandOffset` (skipping xargs' own flags,
+  including ones that take a separate value like `-I {}` or `-n 1`) and checked against the same
+  `allowedCommands` map; if that target is itself `sh` or `xargs`, the scan naturally continues onto
+  it next, applying the same nested re-validation.
+This closes the gap for both directions of nesting (`xargs sh -c "..."` and `sh -c "xargs ..."`)
+without removing `sh`/`xargs`, quoting, pipelines, or any other currently accepted form — existing
+successful workflows keep working; only a `sh`/`xargs` invocation whose target is not itself
+allowlisted (or an unterminated-quote command, newly rejected as unparseable rather than silently
+mis-split) is now rejected. Covered by new tests in [agent_worker_test.go](agent_worker_test.go): a
+characterization table for previously-accepted forms (pipelines, `;`/`&` chains, quoted arguments,
+path-qualified rejection) plus a dedicated table for `sh`/`xargs` — allowed/disallowed scripts and
+targets, pipelines into `xargs`, value/attached flags, both nesting directions, multiple `sh -c` on
+one line, and the unterminated-quote case. Full suite + `-race` pass. The shell-aware-splitting
+problem noted above (top-level `|`/`;`/`&` splitting still isn't quote-aware) is unchanged and
+remains a separate, deferred item — not touched by this fix.
 
 ### 6. Goal-requirement detection is keyword heuristics on free text (instrument first)
 `requiredGoalCommand` and `goalRequiresCodeDeliverable` scan the objective/expected-output/
