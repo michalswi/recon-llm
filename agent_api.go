@@ -52,6 +52,48 @@ func newAgentAPI() *agentAPI {
 	return &agentAPI{runs: make(map[string]*apiAgentRun)}
 }
 
+// evictExpiredRuns drops runs that reached a terminal status
+// (completed/failed/cancelled/limit_reached) more than agentAPIRetentionMinutes
+// ago. Active and waiting-for-input/approval runs are never eligible: their
+// AgentRun.CompletedAt stays zero until finishAgentRun sets it. The on-disk
+// snapshot at ~/.recon/agent_runs/<id>.json remains the audit record — the API
+// never reloads snapshots after a restart anyway — so this only bounds process
+// memory, without changing any request/response shape.
+func (api *agentAPI) evictExpiredRuns() {
+	retention := time.Duration(agentAPIRetentionMinutes) * time.Minute
+	if retention <= 0 {
+		return
+	}
+
+	api.mu.RLock()
+	entries := make(map[string]*apiAgentRun, len(api.runs))
+	for id, entry := range api.runs {
+		entries[id] = entry
+	}
+	api.mu.RUnlock()
+
+	now := time.Now().UTC()
+	var expired []string
+	for id, entry := range entries {
+		run := entry.session.agentSnapshot()
+		if run == nil || run.CompletedAt.IsZero() {
+			continue
+		}
+		if now.Sub(run.CompletedAt) >= retention {
+			expired = append(expired, id)
+		}
+	}
+	if len(expired) == 0 {
+		return
+	}
+
+	api.mu.Lock()
+	for _, id := range expired {
+		delete(api.runs, id)
+	}
+	api.mu.Unlock()
+}
+
 func (api *agentAPI) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", api.handleHealth)
@@ -88,6 +130,7 @@ func (api *agentAPI) handleRuns(response http.ResponseWriter, request *http.Requ
 		writeAgentAPIError(response, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	api.evictExpiredRuns()
 
 	var agentRequest AgentRequest
 	if err := decodeAgentAPIJSON(response, request, &agentRequest); err != nil {
@@ -112,6 +155,7 @@ func (api *agentAPI) handleRuns(response http.ResponseWriter, request *http.Requ
 }
 
 func (api *agentAPI) handleRun(response http.ResponseWriter, request *http.Request) {
+	api.evictExpiredRuns()
 	path := strings.TrimPrefix(request.URL.Path, "/api/agent/runs/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" || len(parts) > 2 {

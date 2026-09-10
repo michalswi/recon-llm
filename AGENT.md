@@ -261,7 +261,7 @@ specific log line is a case the critic missed and the heuristic caught). Grep pr
 either heuristic. Tests in [agent_worker_test.go](agent_worker_test.go) cover the log line format
 and all three firing points via httptest-driven `runAgent` runs. Full suite + `-race` pass.
 
-### 7. API run registry grows without bound (additive, operational)
+### 7. API run registry grows without bound (additive, operational) — IMPLEMENTED
 `agentAPI.runs` (in [agent_api.go](agent_api.go)) is a process-local map that never evicts
 entries — every run created over the process lifetime stays in memory (events, messages,
 snapshots) even long after `completed`/`failed`/`cancelled`. For a long-lived API process handling
@@ -269,6 +269,24 @@ many runs this is a slow memory leak. Idea: add a bounded LRU-style eviction (or
 runs that reached a terminal status more than N minutes ago, keeping the on-disk snapshot as the
 audit record (already the documented behavior — the API doesn't reload snapshots after restart
 anyway). Purely additive; doesn't change any request/response shape.
+
+Implemented in [agent_api.go](agent_api.go): new `agentAPI.evictExpiredRuns()` drops entries whose
+`AgentRun.CompletedAt` (set only by `finishAgentRun`, i.e. only for genuinely terminal statuses —
+`completed`/`failed`/`cancelled`/`limit_reached`) is non-zero and older than
+`agentAPIRetentionMinutes` (new env `RECON_API_RUN_RETENTION_MINUTES`, default 30; `0` disables
+eviction). Active and waiting runs have a zero `CompletedAt` and are therefore never eligible,
+regardless of age. Implemented as a two-phase sweep to avoid nesting `agentAPI.mu` inside a
+session's own lock: first copy the `id -> *apiAgentRun` map under a read lock, then read each
+entry's snapshot (`agentSnapshot()`, which takes only the session's own lock) with `agentAPI.mu`
+released, then take a brief write lock only to delete the collected expired IDs. No background
+goroutine/ticker — the sweep runs opportunistically at the top of `handleRuns` (create) and
+`handleRun` (get/feedback/approve/cancel), so it needs no separate start/stop lifecycle and can't
+leak a goroutine across the many `newAgentAPI()` instances tests construct. Request/response
+shapes are unchanged. Tests in [agent_api_test.go](agent_api_test.go): eviction removes an
+old terminal run while leaving a recent terminal run and every non-terminal status (`running`,
+`waiting_approval`, `waiting_input`) untouched; retention `0` disables eviction entirely; an
+end-to-end test confirms an evicted run now 404s via the real HTTP handler. Full suite + `-race`
+pass.
 
 ### 8. Action schemas are syntactically strict but not action-specific (additive hardening)
 Unknown JSON fields are rejected, but `ToolResponse` is one shared struct, so fields belonging to

@@ -56,8 +56,15 @@ func parseIntEnv(key string, defaultValue int) int {
 	}
 	return parsed
 }
+
 var systemPrompt, systemPromptName = utils.LoadSystemPromptWithName(defaultSystemPrompt)
 var agentAPIAddress = utils.GetEnv("RECON_API_ADDRESS", "")
+
+// agentAPIRetentionMinutes bounds how long a terminal (completed/failed/
+// cancelled/limit_reached) API run stays in agentAPI.runs before it becomes
+// eligible for eviction; 0 disables eviction. The on-disk snapshot remains the
+// audit record regardless.
+var agentAPIRetentionMinutes = parseIntEnv("RECON_API_RUN_RETENTION_MINUTES", 30)
 
 var thinkingEnabled bool
 var startTime time.Time

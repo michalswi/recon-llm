@@ -115,3 +115,82 @@ func agentAPIRequest(t *testing.T, method, url, body string) (int, []byte) {
 	}
 	return response.StatusCode, responseBody
 }
+
+func addTestAPIRun(api *agentAPI, id string, status AgentRunStatus, completedAt time.Time) {
+	sess := &agentSession{ID: id, AgentRun: &AgentRun{ID: id, Status: status, CompletedAt: completedAt}}
+	api.mu.Lock()
+	api.runs[id] = &apiAgentRun{session: sess}
+	api.mu.Unlock()
+}
+
+func assertAPIRunPresent(t *testing.T, api *agentAPI, id string) {
+	t.Helper()
+	api.mu.RLock()
+	_, ok := api.runs[id]
+	api.mu.RUnlock()
+	if !ok {
+		t.Fatalf("expected run %q to still be present", id)
+	}
+}
+
+func assertAPIRunAbsent(t *testing.T, api *agentAPI, id string) {
+	t.Helper()
+	api.mu.RLock()
+	_, ok := api.runs[id]
+	api.mu.RUnlock()
+	if ok {
+		t.Fatalf("expected run %q to have been evicted", id)
+	}
+}
+
+func withAgentAPIRetentionMinutes(t *testing.T, minutes int) {
+	t.Helper()
+	previous := agentAPIRetentionMinutes
+	agentAPIRetentionMinutes = minutes
+	t.Cleanup(func() { agentAPIRetentionMinutes = previous })
+}
+
+func TestAgentAPIEvictExpiredRunsRemovesOldTerminalRuns(t *testing.T) {
+	withAgentAPIRetentionMinutes(t, 30)
+
+	api := newAgentAPI()
+	addTestAPIRun(api, "old-completed", agentCompleted, time.Now().UTC().Add(-2*time.Hour))
+	addTestAPIRun(api, "recent-completed", agentCompleted, time.Now().UTC())
+	addTestAPIRun(api, "still-running", agentRunning, time.Time{})
+	addTestAPIRun(api, "waiting-approval", agentWaitingApproval, time.Time{})
+	addTestAPIRun(api, "waiting-input", agentWaitingInput, time.Time{})
+
+	api.evictExpiredRuns()
+
+	assertAPIRunAbsent(t, api, "old-completed")
+	assertAPIRunPresent(t, api, "recent-completed")
+	assertAPIRunPresent(t, api, "still-running")
+	assertAPIRunPresent(t, api, "waiting-approval")
+	assertAPIRunPresent(t, api, "waiting-input")
+}
+
+func TestAgentAPIRetentionZeroDisablesEviction(t *testing.T) {
+	withAgentAPIRetentionMinutes(t, 0)
+
+	api := newAgentAPI()
+	addTestAPIRun(api, "ancient-completed", agentCompleted, time.Now().UTC().Add(-48*time.Hour))
+
+	api.evictExpiredRuns()
+
+	assertAPIRunPresent(t, api, "ancient-completed")
+}
+
+func TestAgentAPIHandlerEvictsExpiredRunsBeforeLookup(t *testing.T) {
+	withAgentAPIRetentionMinutes(t, 30)
+
+	api := newAgentAPI()
+	addTestAPIRun(api, "expired-run", agentCompleted, time.Now().UTC().Add(-2*time.Hour))
+
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+
+	status, _ := agentAPIRequest(t, http.MethodGet, server.URL+"/api/agent/runs/expired-run", "")
+	if status != http.StatusNotFound {
+		t.Fatalf("expected the evicted run to 404 on lookup, got status %d", status)
+	}
+}

@@ -34,6 +34,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `OLLAMA_NUM_CTX` | unset | Sent as `options.num_ctx` when set to a positive integer; otherwise omitted and the model/server default applies |
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
+| `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes after a run reaches a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) before it is evicted from the in-memory API run registry; `0` disables eviction. The on-disk snapshot remains the audit record either way |
 
 All Ollama requests go through a shared HTTP client (`ollamaHTTPClient` in [runtime.go](runtime.go)). If `OLLAMA_URL` uses plain HTTP to a non-loopback host, a startup warning is printed since prompts and responses would cross the network unencrypted and readable/alterable by a network attacker; use `https://` (optionally with `OLLAMA_CA_CERT`) or an encrypted tunnel instead.
 
@@ -75,7 +76,7 @@ The API is enabled with `-api-address <address>` or `RECON_API_ADDRESS`; it is d
 - `POST /api/agent/runs/{id}/approve` accepts a verified candidate.
 - `POST /api/agent/runs/{id}/cancel` cancels active work and run-owned jobs.
 
-The in-memory API registry is process-local. Persisted snapshots remain audit records and are not loaded after restart. The API has no authentication and must remain loopback-bound or be protected by a trusted authenticated proxy.
+The in-memory API registry is process-local. Persisted snapshots remain audit records and are not loaded after restart. The API has no authentication and must remain loopback-bound or be protected by a trusted authenticated proxy. Runs that reach a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) are evicted from the registry after `RECON_API_RUN_RETENTION_MINUTES` (default 30, `0` disables eviction); active and waiting runs are never evicted. Eviction is swept opportunistically on `POST /api/agent/runs` and `GET|POST /api/agent/runs/{id}...`, not via a background timer.
 
 ## Agent Actions
 

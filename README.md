@@ -53,6 +53,7 @@ When stdin is an interactive terminal (macOS or Linux), the `[goal]:` prompt and
 | `OLLAMA_NUM_CTX` | unset | Sent as `options.num_ctx` when set to a positive integer; otherwise the model/server default is used |
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
+| `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes after a run reaches a terminal status before it's evicted from the in-memory API run registry; `0` disables eviction |
 
 If `OLLAMA_URL` uses plain HTTP to a non-loopback host, recon prints a startup warning: prompts and responses would cross the network unencrypted. Use `https://` (with `OLLAMA_CA_CERT` for a private CA) or an encrypted tunnel instead.
 
@@ -97,6 +98,8 @@ The API follows the same worker and critic lifecycle as the terminal:
 | `POST` | `/api/agent/runs/{id}/cancel` | Cancel a live or waiting run |
 
 Each response includes `sessionId`, which names the persisted snapshot at `~/.recon/agent_runs/<sessionId>.json`.
+
+Runs that reach a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) are evicted from the in-memory registry after `RECON_API_RUN_RETENTION_MINUTES` (default 30); active and waiting runs are never evicted, and the on-disk snapshot is unaffected either way.
 
 The API has no authentication and can initiate commands through the agent. It is disabled by default; keep it bound to loopback unless it is protected by a trusted authenticated proxy.
 
