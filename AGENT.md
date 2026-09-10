@@ -236,7 +236,7 @@ one line, and the unterminated-quote case. Full suite + `-race` pass. The shell-
 problem noted above (top-level `|`/`;`/`&` splitting still isn't quote-aware) is unchanged and
 remains a separate, deferred item — not touched by this fix.
 
-### 6. Goal-requirement detection is keyword heuristics on free text (instrument first)
+### 6. Goal-requirement detection is keyword heuristics on free text (instrument first) — INSTRUMENTED
 `requiredGoalCommand` and `goalRequiresCodeDeliverable` scan the objective/expected-output/
 completion-criteria text for bare words like `run`, `execute`, or `write`/`build`+`code`/`app`.
 This can both over-trigger (a goal that merely *mentions* a command name in passing) and
@@ -246,6 +246,20 @@ so the failure mode is "unnecessary extra command" rather than "bad answer accep
 safety margin, this is lower priority than items 1-2, but worth revisiting if false positives are
 observed in practice (e.g., log how often `requiredGoalCommand` fires vs. how often the critic
 would have caught the same case anyway).
+
+Implemented (observational only — no decision logic changed): new `logAgentHeuristic(runID,
+heuristic, detail)` in [agent_worker.go](agent_worker.go) emits a `[agent-heuristic]` log line
+(same convention as the existing `[ollama]` call logs) at each of the three points where these
+heuristics actually change the outcome: `goalRequiresCodeDeliverable` blocking a no-code-block
+candidate before the critic ever sees it; `requiredGoalCommand` blocking an answer pre-critic when
+no successful matching observation exists yet; and — the most informative case — `requiredGoalCommand`
+*downgrading an answer the critic had already approved* inside `verifyAgentAnswer`, which directly
+answers "how often would the critic have caught this anyway?" (answer: never, in that exact code
+path, since the check only runs when `verification.Approved` is already `true` — every fire of that
+specific log line is a case the critic missed and the heuristic caught). Grep production logs for
+`[agent-heuristic]` to gather the real-world firing rate before deciding whether to refine or relax
+either heuristic. Tests in [agent_worker_test.go](agent_worker_test.go) cover the log line format
+and all three firing points via httptest-driven `runAgent` runs. Full suite + `-race` pass.
 
 ### 7. API run registry grows without bound (additive, operational)
 `agentAPI.runs` (in [agent_api.go](agent_api.go)) is a process-local map that never evicts
@@ -274,7 +288,7 @@ the process exits between model selection and execution. Do not batch or remove 
 without a crash-consistency test proving that command intent and resulting evidence remain
 auditable. Optimize only if profiling shows this is material.
 
-### 10. No coordination between multiple simultaneously running agent instances [toreview]
+### 10. [! TOREVIEW !] No coordination between multiple simultaneously running agent instances
 Today, "many instances" only works in the sense that separate `recon` processes (or separate runs
 within one API process) don't share in-memory state and therefore can't corrupt each other's
 worker loop, job store, or run registry — confirmed safe after the #1/#2 fixes above. But there is

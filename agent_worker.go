@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -314,6 +315,7 @@ func runAgent(ctx context.Context, sess *agentSession) {
 		}
 		if action.Action == "answer" {
 			if goalRequiresCodeDeliverable(run) && !candidateHasCodeBlock(action.Text) {
+				logAgentHeuristic(run.ID, "goalRequiresCodeDeliverable", "blocked candidate answer with no fenced code block")
 				message := "The goal requires source code, but the candidate contains no non-empty fenced code block. Return the complete runnable code directly in the answer."
 				sess.appendAgentEvent(AgentEvent{Kind: "candidate", Action: "answer", Text: action.Text, Thinking: response.Thinking})
 				if !recordAgentRevision(sess, message, nil) {
@@ -322,6 +324,7 @@ func runAgent(ctx context.Context, sess *agentSession) {
 				continue
 			}
 			if command := requiredGoalCommand(run); command != "" && !hasCommandObservation(run.Events, command) {
+				logAgentHeuristic(run.ID, "requiredGoalCommand", fmt.Sprintf("blocked answer before a successful %q observation existed", command))
 				message := fmt.Sprintf("goal requires executing %q before answering; return run_command with that command", command)
 				sess.appendAgentEvent(AgentEvent{Kind: "invalid_action", Text: response.Content, Thinking: response.Thinking})
 				if !recordAgentFailure(sess, message) {
@@ -461,6 +464,14 @@ func requiredGoalCommand(run *AgentRun) string {
 		}
 	}
 	return ""
+}
+
+// logAgentHeuristic records when a keyword-based goal-requirement heuristic
+// (requiredGoalCommand, goalRequiresCodeDeliverable) actually changes the
+// outcome, so real usage can be measured before deciding whether to refine or
+// remove them — see AGENT.md #6. Purely observational: never affects behavior.
+func logAgentHeuristic(runID, heuristic, detail string) {
+	log.Printf("[agent-heuristic][%s] %s: %s", runID, heuristic, detail)
 }
 
 func agentGoalFields(goal string) []string {
@@ -773,6 +784,7 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 		}
 	}
 	if command := requiredGoalCommand(run); verification.Approved && command != "" && !evidenceSupportsCommand(run.Events, verification.EvidenceEventIDs, command) {
+		logAgentHeuristic(run.ID, "requiredGoalCommand", fmt.Sprintf("critic approved but cited no successful %q observation; downgraded to revision", command))
 		verification.Approved = false
 		verification.Feedback = fmt.Sprintf("candidate does not cite a successful %q observation", command)
 	}

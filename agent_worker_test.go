@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -434,5 +436,99 @@ func TestValidateAgentCommandShAndXargsReValidateTheirTarget(t *testing.T) {
 	}
 }
 
+func withCapturedLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	return &buf
+}
 
+func withCriticApprovingOllamaServer(t *testing.T, workerHandler func(attempt int32) []byte) {
+	t.Helper()
+	var attempts int32
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var chatRequest ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&chatRequest); err != nil {
+			t.Errorf("decode ollama request: %v", err)
+		}
+		if len(chatRequest.Messages) > 0 && strings.Contains(chatRequest.Messages[0].Content, "independent critic") {
+			_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":true,"feedback":"","evidenceEventIds":[]}`}})
+			return
+		}
+		content := workerHandler(atomic.AddInt32(&attempts, 1))
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: string(content)}})
+	})
+}
 
+func TestLogAgentHeuristicFormat(t *testing.T) {
+	buf := withCapturedLog(t)
+
+	logAgentHeuristic("run-123", "someHeuristic", "fired for a reason")
+
+	if got := buf.String(); !strings.Contains(got, "[agent-heuristic][run-123] someHeuristic: fired for a reason") {
+		t.Fatalf("unexpected log output: %q", got)
+	}
+}
+
+func TestRunAgentLogsWhenCodeDeliverableHeuristicFires(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	buf := withCapturedLog(t)
+	withCriticApprovingOllamaServer(t, func(attempt int32) []byte {
+		if attempt == 1 {
+			content, _ := json.Marshal(ToolResponse{Action: "answer", Text: "here is a description with no code"})
+			return content
+		}
+		content, _ := json.Marshal(ToolResponse{Action: "answer", Text: "```go\npackage main\n```"})
+		return content
+	})
+
+	sess := &agentSession{ID: "sess-code-heuristic"}
+	sess.AgentRun = newAgentRun(sess.ID, "write code for a simple app", "", "")
+	runAgent(context.Background(), sess)
+
+	if !strings.Contains(buf.String(), "goalRequiresCodeDeliverable: blocked candidate answer with no fenced code block") {
+		t.Fatalf("expected code-deliverable heuristic log line, got: %s", buf.String())
+	}
+}
+
+func TestRunAgentLogsWhenRequiredCommandHeuristicBlocksAnswer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	buf := withCapturedLog(t)
+	withCriticApprovingOllamaServer(t, func(int32) []byte {
+		content, _ := json.Marshal(ToolResponse{Action: "answer", Text: "done without running echo"})
+		return content
+	})
+
+	sess := &agentSession{ID: "sess-required-command"}
+	sess.AgentRun = newAgentRun(sess.ID, "run echo to check connectivity", "", "")
+	runAgent(context.Background(), sess)
+
+	want := `requiredGoalCommand: blocked answer before a successful "echo" observation existed`
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("expected required-command heuristic log line, got: %s", buf.String())
+	}
+}
+
+func TestRunAgentLogsWhenCriticApprovalIsDowngradedByRequiredCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	buf := withCapturedLog(t)
+	withCriticApprovingOllamaServer(t, func(attempt int32) []byte {
+		if attempt == 1 {
+			content, _ := json.Marshal(ToolResponse{Action: "run_command", Command: "echo hi"})
+			return content
+		}
+		content, _ := json.Marshal(ToolResponse{Action: "answer", Text: "connectivity confirmed"})
+		return content
+	})
+
+	sess := &agentSession{ID: "sess-critic-downgrade"}
+	sess.AgentRun = newAgentRun(sess.ID, "run echo to check connectivity", "", "")
+	runAgent(context.Background(), sess)
+
+	want := `requiredGoalCommand: critic approved but cited no successful "echo" observation; downgraded to revision`
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("expected required-command downgrade heuristic log line, got: %s", buf.String())
+	}
+}
