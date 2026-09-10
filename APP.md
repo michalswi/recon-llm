@@ -30,13 +30,15 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used for worker and critic calls |
 | `OLLAMA_CA_CERT` | unset | Optional path to a PEM CA certificate trusted in addition to the system pool, for a self-signed cert on a TLS-terminating Ollama reverse proxy; has no effect unless `OLLAMA_URL` uses `https://` |
 | `OLLAMA_INSECURE_SKIP_VERIFY` | `false` | Disables TLS certificate validation for Ollama connections and ignores `OLLAMA_CA_CERT`. Testing only — a network attacker can impersonate the endpoint undetected |
+| `OLLAMA_NUM_PREDICT` | `-1` (no limit) | Sent as `options.num_predict` on every chat request, overriding any smaller default baked into a model's Modelfile so long answers (e.g. generated code) aren't truncated mid-response |
+| `OLLAMA_NUM_CTX` | unset | Sent as `options.num_ctx` when set to a positive integer; otherwise omitted and the model/server default applies |
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 
 All Ollama requests go through a shared HTTP client (`ollamaHTTPClient` in [runtime.go](runtime.go)). If `OLLAMA_URL` uses plain HTTP to a non-loopback host, a startup warning is printed since prompts and responses would cross the network unencrypted and readable/alterable by a network attacker; use `https://` (optionally with `OLLAMA_CA_CERT`) or an encrypted tunnel instead.
 
 
-The application sends non-streaming chat requests. Agent calls set `format: "json"`; thinking is controlled with `/think-on` and `/think-off`.
+The application sends non-streaming chat requests. Agent calls set `format: "json"`; thinking is controlled with `/think-on` and `/think-off`. A model response that is cut off mid-JSON (e.g. a long code answer hitting the model's own output limit) is detected and treated as a revision request asking for a shorter, complete answer, rather than spending one of the run's 3 consecutive-failure strikes.
 
 ## Diagnostics
 

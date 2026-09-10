@@ -286,6 +286,13 @@ func runAgent(ctx context.Context, sess *agentSession) {
 		action, err := parseAgentAction(response.Content)
 		if err != nil {
 			sess.appendAgentEvent(AgentEvent{Kind: "invalid_action", Text: response.Content, Thinking: response.Thinking})
+			if isTruncatedAgentJSON(err) {
+				message := "Your previous response was cut off before the JSON object was fully closed (the answer was likely too long). Return the same action again, but keep the response short enough to complete: for a code deliverable, omit comments and blank lines, or split it into a smaller self-contained answer, and make sure the JSON object is fully closed."
+				if !recordAgentRevision(sess, message, nil) {
+					return
+				}
+				continue
+			}
 			if !recordAgentFailure(sess, err.Error()) {
 				return
 			}
@@ -868,6 +875,15 @@ func agentEvidenceEventIsValid(event AgentEvent) bool {
 		// intent, rejection, or failure — never structurally valid proof of a claim.
 		return false
 	}
+}
+
+// isTruncatedAgentJSON reports whether a parseAgentAction failure looks like
+// the model's response was cut off mid-JSON (e.g. a long code answer hitting
+// its output limit) rather than a genuinely malformed or wrong-schema
+// response. Truncation is recoverable by asking for a shorter complete
+// answer, so callers should not spend a strike of the 3-failure budget on it.
+func isTruncatedAgentJSON(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func parseAgentAction(raw string) (ToolResponse, error) {

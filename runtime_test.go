@@ -190,6 +190,32 @@ func withFastRetryBackoff(t *testing.T, backoff time.Duration) {
 	t.Cleanup(func() { ollamaRetryBaseBackoff = previous })
 }
 
+func TestOllamaChatOptionsDefaultsToUnlimitedNumPredict(t *testing.T) {
+	if got := ollamaChatOptions().NumPredict; got != ollamaNumPredict {
+		t.Fatalf("expected NumPredict to reflect ollamaNumPredict (%d), got %d", ollamaNumPredict, got)
+	}
+	if ollamaNumPredict != -1 {
+		t.Fatalf("expected default OLLAMA_NUM_PREDICT of -1 (no limit) when unset, got %d", ollamaNumPredict)
+	}
+}
+
+func TestCallOllamaMessageContextSendsNumPredict(t *testing.T) {
+	var captured ChatRequest
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: "ok"}})
+	})
+
+	if _, err := callOllamaMessageContext(context.Background(), []ChatMessage{{Role: "user", Content: "hi"}}, false, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.Options == nil || captured.Options.NumPredict != ollamaNumPredict {
+		t.Fatalf("expected request options to carry NumPredict=%d, got %#v", ollamaNumPredict, captured.Options)
+	}
+}
+
 func TestCallOllamaMessageWithRetrySucceedsAfterTransientServerError(t *testing.T) {
 	withFastRetryBackoff(t, time.Millisecond)
 	var calls int32

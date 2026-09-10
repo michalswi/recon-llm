@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -305,6 +306,65 @@ func TestVerifyAgentAnswerRejectsCriticEvidenceThatCannotProveIt(t *testing.T) {
 	}
 	if verification.Feedback == "" {
 		t.Fatal("expected feedback explaining the rejected evidence")
+	}
+}
+
+func TestIsTruncatedAgentJSON(t *testing.T) {
+	_, truncatedErr := parseAgentAction(`{"action": "answer", "text": "partial`)
+	if !isTruncatedAgentJSON(truncatedErr) {
+		t.Fatalf("expected a cut-off JSON string to be classified as truncated, got: %v", truncatedErr)
+	}
+
+	_, schemaErr := parseAgentAction(`{"action": "not_a_real_action"}`)
+	if isTruncatedAgentJSON(schemaErr) {
+		t.Fatalf("expected an unsupported-action error to NOT be classified as truncated, got: %v", schemaErr)
+	}
+
+	_, trailingErr := parseAgentAction(`{"action":"answer","text":"hi"} {"action":"answer","text":"again"}`)
+	if isTruncatedAgentJSON(trailingErr) {
+		t.Fatalf("expected a trailing-content error to NOT be classified as truncated, got: %v", trailingErr)
+	}
+}
+
+func TestRunAgentTreatsTruncatedJSONAsRevisionNotFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var workerAttempts int32
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var chatRequest ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&chatRequest); err != nil {
+			t.Errorf("decode ollama request: %v", err)
+		}
+		if len(chatRequest.Messages) > 0 && strings.Contains(chatRequest.Messages[0].Content, "independent critic") {
+			_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":true,"feedback":"","evidenceEventIds":[]}`}})
+			return
+		}
+		if atomic.AddInt32(&workerAttempts, 1) <= 4 {
+			// Simulate Ollama returning a valid envelope whose message content is
+			// itself cut off mid-JSON, as a long code answer would be.
+			_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"action": "answer", "text": "partial`}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"action":"answer","text":"a short greeting"}`}})
+	}))
+	defer ollama.Close()
+	previousURL := ollamaURL
+	ollamaURL = ollama.URL
+	t.Cleanup(func() { ollamaURL = previousURL })
+
+	sess := &agentSession{ID: "sess-truncation"}
+	sess.AgentRun = newAgentRun(sess.ID, "say hello", "", "")
+
+	runAgent(context.Background(), sess)
+
+	run := sess.agentSnapshot()
+	if run.Status != agentWaitingApproval {
+		t.Fatalf("expected the run to reach waiting_approval despite repeated truncation, got status=%q error=%q", run.Status, run.Error)
+	}
+	if run.ConsecutiveErrors != 0 {
+		t.Fatalf("expected ConsecutiveErrors to stay at 0 (truncation must not spend the 3-strike budget), got %d", run.ConsecutiveErrors)
+	}
+	if got := atomic.LoadInt32(&workerAttempts); got < 5 {
+		t.Fatalf("expected more than 3 worker attempts since truncation alone must not stop the run, got %d", got)
 	}
 }
 

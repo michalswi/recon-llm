@@ -92,6 +92,26 @@ type ChatRequest struct {
 	Stream   bool          `json:"stream"`
 	Format   string        `json:"format,omitempty"`
 	Think    bool          `json:"think"`
+	Options  *ChatOptions  `json:"options,omitempty"`
+}
+
+// ChatOptions carries Ollama generation options. NumPredict overrides any
+// smaller default baked into a model's Modelfile so long answers (e.g.
+// generated code) aren't silently truncated mid-response.
+type ChatOptions struct {
+	NumPredict int `json:"num_predict,omitempty"`
+	NumCtx     int `json:"num_ctx,omitempty"`
+}
+
+// ollamaChatOptions builds the options sent with every chat request from the
+// configurable ollamaNumPredict/ollamaNumCtx package vars (OLLAMA_NUM_PREDICT,
+// OLLAMA_NUM_CTX).
+func ollamaChatOptions() *ChatOptions {
+	options := &ChatOptions{NumPredict: ollamaNumPredict}
+	if ollamaNumCtx > 0 {
+		options.NumCtx = ollamaNumCtx
+	}
+	return options
 }
 
 type ChatResponse struct {
@@ -430,7 +450,7 @@ func executeBackgroundCommand(sessionID, runID, command string) (BackgroundJob, 
 }
 
 func callOllamaMessageContext(ctx context.Context, messages []ChatMessage, forceJSON, think bool) (ChatMessage, error) {
-	requestBody := ChatRequest{Model: modelName, Messages: messages, Stream: false, Think: think}
+	requestBody := ChatRequest{Model: modelName, Messages: messages, Stream: false, Think: think, Options: ollamaChatOptions()}
 	if forceJSON {
 		requestBody.Format = "json"
 	}

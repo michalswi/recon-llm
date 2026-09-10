@@ -49,6 +49,8 @@ When stdin is an interactive terminal (macOS or Linux), the `[goal]:` prompt and
 | `OLLAMA_MODEL` | `qwen3.5:0.8b` | Model used by the worker, critic, and compactor |
 | `OLLAMA_CA_CERT` | unset | Path to a PEM CA certificate to trust, for a self-signed cert on a TLS-terminating Ollama reverse proxy; only takes effect when `OLLAMA_URL` uses `https://` |
 | `OLLAMA_INSECURE_SKIP_VERIFY` | `false` | Disable TLS certificate validation for Ollama connections; ignores `OLLAMA_CA_CERT`. Testing only — a network attacker can impersonate the endpoint undetected |
+| `OLLAMA_NUM_PREDICT` | `-1` (no limit) | Sent as `options.num_predict` on every request, so a model's own default output-length limit can't silently truncate long answers |
+| `OLLAMA_NUM_CTX` | unset | Sent as `options.num_ctx` when set to a positive integer; otherwise the model/server default is used |
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 
