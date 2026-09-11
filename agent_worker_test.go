@@ -532,3 +532,61 @@ func TestRunAgentLogsWhenCriticApprovalIsDowngradedByRequiredCommand(t *testing.
 		t.Fatalf("expected required-command downgrade heuristic log line, got: %s", buf.String())
 	}
 }
+
+func TestParseAgentActionAcceptsEachActionsOwnFields(t *testing.T) {
+	cases := []string{
+		`{"action":"answer","text":"done"}`,
+		`{"action":"update_findings","text":"partial notes"}`,
+		`{"action":"request_clarification","text":"which format?"}`,
+		`{"action":"run_command","command":"ls -la"}`,
+		`{"action":"run_command_bg","command":"ls -la"}`,
+		`{"action":"check_job","jobId":"job_1"}`,
+		`{"action":"get_job","jobId":"job_1"}`,
+		`{"action":"cancel_job","jobId":"job_1"}`,
+		`{"action":"list_jobs"}`,
+		`{"action":"list_directory","path":"/tmp","maxDepth":2}`,
+		`{"action":"search_files","path":"/tmp","pattern":"foo"}`,
+		`{"action":"create_plan","steps":["step one"]}`,
+		`{"action":"complete_step","stepId":1,"evidenceEventIds":[1,2]}`,
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseAgentAction(raw); err != nil {
+				t.Fatalf("expected %s to be accepted, got error: %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestParseAgentActionRejectsCrossActionFields(t *testing.T) {
+	cases := []string{
+		`{"action":"answer","text":"done","command":"ls"}`,
+		`{"action":"list_jobs","text":"ignored"}`,
+		`{"action":"run_command","command":"ls","path":"/tmp"}`,
+		`{"action":"check_job","jobId":"job_1","stepId":1}`,
+		`{"action":"create_plan","steps":["a"],"jobId":"job_1"}`,
+		`{"action":"complete_step","stepId":1,"command":"ls"}`,
+		`{"action":"search_files","path":"/tmp","pattern":"foo","text":"extra"}`,
+		`{"action":"list_directory","path":"/tmp","pattern":"foo"}`,
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseAgentAction(raw); err == nil {
+				t.Fatalf("expected %s to be rejected for carrying a cross-action field", raw)
+			}
+		})
+	}
+}
+
+func TestParseAgentActionFieldScopeViolationIsLogged(t *testing.T) {
+	buf := withCapturedLog(t)
+
+	if _, err := parseAgentAction(`{"action":"answer","text":"done","command":"ls"}`); err == nil {
+		t.Fatal("expected the cross-action field to be rejected")
+	}
+
+	want := `[agent-schema] action "answer" carried out-of-scope field(s): command`
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("expected schema-scope violation log line, got: %s", buf.String())
+	}
+}

@@ -949,7 +949,72 @@ func parseAgentAction(raw string) (ToolResponse, error) {
 	default:
 		return ToolResponse{}, fmt.Errorf("unsupported agent action %q", action.Action)
 	}
+	if err := validateAgentActionFieldScope(action); err != nil {
+		return ToolResponse{}, err
+	}
 	return action, nil
+}
+
+// agentActionAllowedFields maps each action to the ToolResponse fields it may
+// carry (beyond "action" itself), matching the field usage in parseAgentAction
+// and executeAgentAction. Anything else must be left at its zero value.
+var agentActionAllowedFields = map[string]map[string]bool{
+	"answer":                {"text": true},
+	"update_findings":       {"text": true},
+	"request_clarification": {"text": true},
+	"run_command":           {"command": true},
+	"run_command_bg":        {"command": true},
+	"check_job":             {"jobId": true},
+	"get_job":               {"jobId": true},
+	"cancel_job":            {"jobId": true},
+	"list_jobs":             {},
+	"list_directory":        {"path": true, "maxDepth": true},
+	"search_files":          {"path": true, "pattern": true},
+	"create_plan":           {"steps": true},
+	"complete_step":         {"stepId": true, "evidenceEventIds": true},
+}
+
+// validateAgentActionFieldScope rejects a response whose action carries a
+// non-zero field belonging to a different action's schema (e.g. an "answer"
+// with a "command", or "list_jobs" with "text"). Unknown JSON keys are already
+// rejected by DisallowUnknownFields; this closes the remaining gap where
+// ToolResponse's shared struct otherwise accepts and silently ignores fields
+// that don't belong to the selected action, which can conceal model confusion.
+func validateAgentActionFieldScope(action ToolResponse) error {
+	allowed := agentActionAllowedFields[action.Action]
+	var stray []string
+	if action.Command != "" && !allowed["command"] {
+		stray = append(stray, "command")
+	}
+	if action.Path != "" && !allowed["path"] {
+		stray = append(stray, "path")
+	}
+	if action.Pattern != "" && !allowed["pattern"] {
+		stray = append(stray, "pattern")
+	}
+	if action.MaxDepth != 0 && !allowed["maxDepth"] {
+		stray = append(stray, "maxDepth")
+	}
+	if action.Text != "" && !allowed["text"] {
+		stray = append(stray, "text")
+	}
+	if action.JobID != "" && !allowed["jobId"] {
+		stray = append(stray, "jobId")
+	}
+	if len(action.Steps) > 0 && !allowed["steps"] {
+		stray = append(stray, "steps")
+	}
+	if action.StepID != 0 && !allowed["stepId"] {
+		stray = append(stray, "stepId")
+	}
+	if len(action.EvidenceEventIDs) > 0 && !allowed["evidenceEventIds"] {
+		stray = append(stray, "evidenceEventIds")
+	}
+	if len(stray) == 0 {
+		return nil
+	}
+	log.Printf("[agent-schema] action %q carried out-of-scope field(s): %s", action.Action, strings.Join(stray, ", "))
+	return fmt.Errorf("action %q must not include field(s): %s", action.Action, strings.Join(stray, ", "))
 }
 
 func validateAgentCommand(command string) error {

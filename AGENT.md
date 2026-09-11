@@ -288,7 +288,7 @@ old terminal run while leaving a recent terminal run and every non-terminal stat
 end-to-end test confirms an evicted run now 404s via the real HTTP handler. Full suite + `-race`
 pass.
 
-### 8. Action schemas are syntactically strict but not action-specific (additive hardening)
+### 8. Action schemas are syntactically strict but not action-specific (additive hardening) — IMPLEMENTED
 Unknown JSON fields are rejected, but `ToolResponse` is one shared struct, so fields belonging to
 another known action are accepted and silently ignored. For example, an `answer` can carry a
 `command`, or `list_jobs` can carry `text`. This is not currently an execution vulnerability, but
@@ -298,6 +298,22 @@ confusion.
 Preserving fix: validate that fields not belonging to the selected action have zero values. Start
 with telemetry or tests against real model outputs; rejecting newly detected malformed actions
 can change recovery behavior, so land this independently from the correctness fixes above.
+
+Implemented in [agent_worker.go](agent_worker.go): new `agentActionAllowedFields` maps each action
+to the `ToolResponse` fields it may legitimately carry (matching exactly what `parseAgentAction`/
+`executeAgentAction` already read for that action), and `validateAgentActionFieldScope` rejects any
+other field left at a non-zero value — e.g. an `answer` carrying `command`, or `list_directory`
+carrying `pattern`. Runs after the existing per-action required-field checks in `parseAgentAction`,
+so it only ever adds a new failure mode on top of already-valid actions, never replaces an existing
+check. Every violation is also logged (`[agent-schema] action %q carried out-of-scope field(s):
+%s`) for production visibility — the telemetry/tests de-risking this item asked for, since a
+misclassified legitimate action would show up immediately in logs. A rejected action flows through
+the existing `invalid_action`/`recordAgentFailure` path exactly like any other schema violation
+(e.g. a missing required field), so recovery behavior for genuinely malformed actions is unchanged;
+only actions that previously had a silently-ignored foreign field are newly rejected. Covered by
+new tests in [agent_worker_test.go](agent_worker_test.go): every action's own valid field
+combination still parses, a cross-action field is rejected for every action, and the log line is
+verified. Full suite + `-race` pass.
 
 ### 9. Persistence is frequent but intentionally crash-oriented (minor, measure first)
 The loop persists before executing an action and again after execution, plus at terminal state
