@@ -315,12 +315,26 @@ new tests in [agent_worker_test.go](agent_worker_test.go): every action's own va
 combination still parses, a cross-action field is rejected for every action, and the log line is
 verified. Full suite + `-race` pass.
 
-### 9. Persistence is frequent but intentionally crash-oriented (minor, measure first)
+### 9. Persistence is frequent but intentionally crash-oriented (minor, measure first) — MEASURED
 The loop persists before executing an action and again after execution, plus at terminal state
 transitions. This makes disk I/O scale with iterations but prevents an unrecorded side effect when
 the process exits between model selection and execution. Do not batch or remove these writes
 without a crash-consistency test proving that command intent and resulting evidence remain
 auditable. Optimize only if profiling shows this is material.
+
+Implemented (measurement only — no write was batched, removed, or reordered): `agentSession`
+([runtime.go](runtime.go)) gained unexported `persistCount`/`persistBytes`/`persistDuration`
+counters, updated inside `persist()` on every call and readable via new `persistenceStats()`.
+These are plain in-process fields, not referenced by `persistedAgentState`, so the on-disk snapshot
+schema is provably unchanged (covered by a test that greps the written JSON for the new field
+names). `finishAgent` ([agent_worker.go](agent_worker.go)) logs a `[agent-persist]` summary (call
+count, total bytes, total duration) once per run when it reaches a terminal state, giving exactly
+the profiling data this item asks for — grep production logs for `[agent-persist]` across enough
+runs to see whether persistence overhead is ever material before considering batching or removing
+any write. Covered by new tests in [agent_worker_test.go](agent_worker_test.go): counters
+accumulate correctly across multiple `persist()` calls, the summary line is logged on completion,
+and the persisted snapshot file is asserted to never contain the new field names. Full suite +
+`-race` pass.
 
 ### 10. [! TOREVIEW !] No coordination between multiple simultaneously running agent instances
 Today, "many instances" only works in the sense that separate `recon` processes (or separate runs

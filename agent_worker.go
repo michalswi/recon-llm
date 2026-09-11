@@ -1504,7 +1504,22 @@ func finishAgent(sess *agentSession, status AgentRunStatus, answer, errorText st
 		text = answer
 	}
 	sess.appendAgentEvent(AgentEvent{Kind: "status", Text: string(status) + ": " + text})
+	logAgentPersistenceStats(sess)
 	cleanupAgentRunResources(sess)
+}
+
+// logAgentPersistenceStats reports accumulated persist() overhead (call
+// count, bytes written, total time) for a run that just reached a terminal
+// state, so real usage can show whether the frequent persist-before/
+// persist-after writes are material before considering batching or removing
+// any of them — see AGENT.md #9, "measure first".
+func logAgentPersistenceStats(sess *agentSession) {
+	run := sess.agentSnapshot()
+	if run == nil {
+		return
+	}
+	count, totalBytes, totalDuration := sess.persistenceStats()
+	log.Printf("[agent-persist][%s] calls=%d totalBytes=%d totalDuration=%s", run.ID, count, totalBytes, totalDuration.Round(time.Millisecond))
 }
 
 func cleanupAgentRunResources(sess *agentSession) {

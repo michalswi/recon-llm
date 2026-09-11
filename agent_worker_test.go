@@ -590,3 +590,69 @@ func TestParseAgentActionFieldScopeViolationIsLogged(t *testing.T) {
 		t.Fatalf("expected schema-scope violation log line, got: %s", buf.String())
 	}
 }
+
+func TestPersistAccumulatesPersistenceStats(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess := &agentSession{ID: "sess-persist-stats"}
+	sess.AgentRun = newAgentRun(sess.ID, "test goal", "", "")
+
+	if err := sess.persist(); err != nil {
+		t.Fatalf("first persist failed: %v", err)
+	}
+	if err := sess.persist(); err != nil {
+		t.Fatalf("second persist failed: %v", err)
+	}
+
+	count, totalBytes, totalDuration := sess.persistenceStats()
+	if count != 2 {
+		t.Fatalf("expected 2 recorded persist() calls, got %d", count)
+	}
+	if totalBytes <= 0 {
+		t.Fatalf("expected positive total bytes written, got %d", totalBytes)
+	}
+	if totalDuration < 0 {
+		t.Fatalf("expected non-negative total duration, got %s", totalDuration)
+	}
+}
+
+func TestFinishAgentLogsPersistenceStats(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	buf := withCapturedLog(t)
+
+	sess := &agentSession{ID: "sess-finish-persist"}
+	sess.AgentRun = newAgentRun(sess.ID, "test goal", "", "")
+	if err := sess.persist(); err != nil {
+		t.Fatalf("persist failed: %v", err)
+	}
+
+	finishAgent(sess, agentCompleted, "done", "")
+
+	run := sess.agentSnapshot()
+	want := "[agent-persist][" + run.ID + "] calls="
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("expected persistence stats log line, got: %s", buf.String())
+	}
+}
+
+func TestPersistedSnapshotDoesNotExposePersistenceCounters(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess := &agentSession{ID: "sess-schema-check"}
+	sess.AgentRun = newAgentRun(sess.ID, "test goal", "", "")
+	if err := sess.persist(); err != nil {
+		t.Fatalf("persist failed: %v", err)
+	}
+
+	path, err := reconAgentRunPath(sess.ID)
+	if err != nil {
+		t.Fatalf("reconAgentRunPath: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted snapshot: %v", err)
+	}
+	for _, forbidden := range []string{"persistCount", "persistBytes", "persistDuration"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("persisted snapshot must not expose in-memory measurement field %q", forbidden)
+		}
+	}
+}

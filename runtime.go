@@ -190,6 +190,13 @@ type agentSession struct {
 	AgentRun           *AgentRun `json:"agentRun,omitempty"`
 	agentCancel        context.CancelFunc
 	eventSink          func(AgentEvent)
+
+	// Persistence measurement only (never serialized — persistedAgentState does
+	// not reference these): see AGENT.md #9, "measure first" before optimizing
+	// the frequent persist() writes.
+	persistCount    int
+	persistBytes    int64
+	persistDuration time.Duration
 }
 
 type persistedAgentState struct {
@@ -200,6 +207,7 @@ type persistedAgentState struct {
 }
 
 func (s *agentSession) persist() error {
+	started := time.Now()
 	s.mu.Lock()
 	state := persistedAgentState{
 		SessionID: s.ID,
@@ -223,7 +231,22 @@ func (s *agentSession) persist() error {
 	if err := os.WriteFile(tempPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write agent state: %w", err)
 	}
-	return os.Rename(tempPath, path)
+	err = os.Rename(tempPath, path)
+	s.mu.Lock()
+	s.persistCount++
+	s.persistBytes += int64(len(data))
+	s.persistDuration += time.Since(started)
+	s.mu.Unlock()
+	return err
+}
+
+// persistenceStats reports the accumulated persist() call count, total bytes
+// written, and total time spent, for measuring whether the frequent
+// persist-before/persist-after writes (AGENT.md #9) are material in practice.
+func (s *agentSession) persistenceStats() (count int, totalBytes int64, totalDuration time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistCount, s.persistBytes, s.persistDuration
 }
 
 func cloneAgentRun(run *AgentRun) *AgentRun {
@@ -252,7 +275,6 @@ func clonePlanSteps(steps []AgentPlanStep) []AgentPlanStep {
 	}
 	return cloned
 }
-
 
 // BackgroundJob is an immutable snapshot of a background job's state, safe to
 // read and share across goroutines without further locking. All mutation goes
