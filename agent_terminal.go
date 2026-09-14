@@ -434,7 +434,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 			if attachment.Type == "image" {
 				attachmentNote.WriteString("\nThe image is attached directly to the model message for visual analysis.")
 			} else if extractedText, extractErr := extractAttachmentText(absolutePath, fileInfo.Size()); extractErr == nil {
-				attachmentNote.WriteString("\nExtracted content:\n" + truncateAgentText(extractedText))
+				fmt.Fprintf(&attachmentNote, "\nExtracted content:\n%s", truncateAgentText(extractedText))
 			} else {
 				attachmentNote.WriteString("\nUse the allowed command-line tools to inspect this file when needed.")
 			}
