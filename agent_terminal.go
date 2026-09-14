@@ -32,7 +32,7 @@ type AgentRequest struct {
 }
 
 const (
-	maxAgentAttachments         = 16
+	maxAgentAttachments         = 30
 	maxAgentImageSize           = 20 << 20
 	maxAgentDocumentExtractSize = 20 << 20
 )

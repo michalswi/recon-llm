@@ -62,7 +62,7 @@ If `OLLAMA_URL` uses plain HTTP to a non-loopback host, recon prints a startup w
 
 Enter an objective directly to start a run. An existing absolute `.jpg`, `.jpeg`, `.png`, or `.webp` path in the objective is attached directly to Ollama for visual analysis. Image analysis requires a vision-capable model.
 
-Use `/attach PATH` to attach a file or the regular files in a directory to every subsequent run in the current terminal process. Up to 16 files can be active. Run `/attached` to list them, `/deattach PATH` (or `/detach PATH`) to remove one, or `/deattach`/`/detach` with no argument to clear all. Use `/agent [GOAL]` for the structured form, which also accepts expected output, constraints, completion criteria, and a one-run attachment path.
+Use `/attach PATH` to attach a file or the regular files in a directory to every subsequent run in the current terminal process. Up to 30 files can be active. Image attachments are capped at 20 MiB, and non-image attachments are capped at 20 MiB for text extraction. Run `/attached` to list them, `/deattach PATH` (or `/detach PATH`) to remove one, or `/deattach`/`/detach` with no argument to clear all. Use `/agent [GOAL]` for the structured form, which also accepts expected output, constraints, completion criteria, and a one-run attachment path.
 
 The agent prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
 
