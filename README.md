@@ -133,6 +133,6 @@ Not every command listed in [comm.go](comm.go) is installed in the image.
 
 ## Security
 
-Command execution is not a sandbox. The agent runs commands with the filesystem and network permissions of the recon process. Use it only in a trusted environment and only against systems you are authorized to access.
+Command execution is not a sandbox. The agent runs commands with the filesystem and network permissions of the recon process. Use it only in a trusted environment and only against systems you are authorized to access. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination.
 
 Licensed under the [Apache License 2.0](LICENSE).

@@ -117,7 +117,7 @@ The decoder requires exactly one JSON object and rejects unknown fields or trail
 
 The nominal command allowlist is defined in `comm.go`. Agent commands are validated before execution, but execution is not sandboxed and uses the operating-system permissions of the recon process. Background commands use `bash -c`; run cleanup cancels jobs owned by that run.
 
-Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets.
+Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination.
 
 ## Product Invariants
 
