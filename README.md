@@ -51,6 +51,7 @@ When stdin is an interactive terminal (macOS or Linux), the `[goal]:` prompt and
 | `OLLAMA_INSECURE_SKIP_VERIFY` | `false` | Disable TLS certificate validation for Ollama connections; ignores `OLLAMA_CA_CERT`. Testing only — a network attacker can impersonate the endpoint undetected |
 | `OLLAMA_NUM_PREDICT` | `-1` (no limit) | Sent as `options.num_predict` on every request, so a model's own default output-length limit can't silently truncate long answers |
 | `OLLAMA_NUM_CTX` | unset | Sent as `options.num_ctx` when set to a positive integer; otherwise the model/server default is used |
+| `RECON_MODEL_TIMEOUT` | `5m` | Maximum duration of one model request, using Go duration syntax such as `90s` or `10m`; local timeouts are not retried |
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 | `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes after a run reaches a terminal status before it's evicted from the in-memory API run registry; `0` disables eviction |
@@ -62,9 +63,9 @@ If `OLLAMA_URL` uses plain HTTP to a non-loopback host, recon prints a startup w
 
 Enter an objective directly to start a run. An existing absolute `.jpg`, `.jpeg`, `.png`, or `.webp` path in the objective is attached directly to Ollama for visual analysis. Image analysis requires a vision-capable model.
 
-Use `/attach PATH` to attach a file or the regular files in a directory to every subsequent run in the current terminal process. Up to 30 files can be active. Image attachments are capped at 20 MiB, and non-image attachments are capped at 20 MiB for text extraction. Run `/attached` to list them, `/deattach PATH` (or `/detach PATH`) to remove one, or `/deattach`/`/detach` with no argument to clear all. Use `/agent [GOAL]` for the structured form, which also accepts expected output, constraints, completion criteria, and a one-run attachment path.
+Use `/attach PATH` to attach a file or the regular files in a directory to every subsequent run in the current terminal process. Up to 30 files can be active. Image attachments are capped at 20 MiB. Non-image attachments are capped at 20 MiB for extraction and share a 64 KiB inline-text budget per run; directory members initially include at most a 1 KiB excerpt each, with their paths preserved for targeted inspection by the agent. Run `/attached` to list them, `/deattach PATH` (or `/detach PATH`) to remove one, or `/deattach`/`/detach` with no argument to clear all. Use `/agent [GOAL]` for the structured form, which also accepts expected output, constraints, completion criteria, and a one-run attachment path.
 
-The agent prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
+The agent immediately prints a working status before its first non-streaming model request, including the configured request timeout. It then prints plans, commands, observations, and critic feedback as they occur. It pauses when it needs clarification or when a verified candidate answer is ready. A candidate can be accepted, revised with feedback, or stopped. Press Ctrl+C to cancel an active run and its owned background jobs.
 
 Run `/h` for all terminal controls, including `/ollama` to re-check server reachability, `/ollama-ps` to list currently loaded models, and `/ollama-ls` to list available models, without restarting. Prompt selection and thinking mode apply to subsequent runs.
 

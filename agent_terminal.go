@@ -35,6 +35,8 @@ const (
 	maxAgentAttachments         = 30
 	maxAgentImageSize           = 20 << 20
 	maxAgentDocumentExtractSize = 20 << 20
+	maxAgentAttachmentText      = 64 << 10
+	maxAgentDirectoryExcerpt    = 1 << 10
 )
 
 var terminalAttachmentPaths []string
@@ -394,12 +396,18 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 
 	goalDescription := request.Goal
 	var attachmentNote strings.Builder
+	attachmentTextRemaining := maxAgentAttachmentText
 	resolvedAttachments := make(map[string]bool)
 	for _, attachmentPath := range attachmentPaths {
 		paths, err := resolveAttachmentPaths(attachmentPath)
 		if err != nil {
 			return nil, err
 		}
+		sourceInfo, err := os.Stat(strings.TrimSpace(attachmentPath))
+		if err != nil {
+			return nil, fmt.Errorf("open attachment: %w", err)
+		}
+		directoryAttachment := sourceInfo.IsDir()
 		for _, absolutePath := range paths {
 			if resolvedAttachments[absolutePath] {
 				continue
@@ -434,7 +442,18 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 			if attachment.Type == "image" {
 				attachmentNote.WriteString("\nThe image is attached directly to the model message for visual analysis.")
 			} else if extractedText, extractErr := extractAttachmentText(absolutePath, fileInfo.Size()); extractErr == nil {
-				fmt.Fprintf(&attachmentNote, "\nExtracted content:\n%s", truncateAgentText(extractedText))
+				excerptLimit := agentMaxObservation
+				if directoryAttachment {
+					excerptLimit = maxAgentDirectoryExcerpt
+				}
+				excerpt, truncated := attachmentTextExcerpt(extractedText, excerptLimit, attachmentTextRemaining)
+				attachmentTextRemaining -= len(excerpt)
+				if excerpt != "" {
+					fmt.Fprintf(&attachmentNote, "\nExtracted content:\n%s", excerpt)
+				}
+				if directoryAttachment || truncated {
+					attachmentNote.WriteString("\nExcerpt only; use the allowed tools to inspect the file path for more detail.")
+				}
 			} else {
 				attachmentNote.WriteString("\nUse the allowed command-line tools to inspect this file when needed.")
 			}
@@ -457,6 +476,17 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		return nil, err
 	}
 	return sess, nil
+}
+
+func attachmentTextExcerpt(text string, perFileLimit, remaining int) (string, bool) {
+	limit := min(perFileLimit, remaining)
+	if limit <= 0 {
+		return "", len(text) > 0
+	}
+	if len(text) <= limit {
+		return text, false
+	}
+	return text[:limit], true
 }
 
 func imagePathFromGoal(goal string) string {
@@ -563,6 +593,10 @@ func resumeAgent(sess *agentSession, feedback string) {
 
 func printAgentEvent(event AgentEvent) {
 	switch event.Kind {
+	case "status":
+		if event.Text == "Agent run started" {
+			fmt.Printf("%s waiting for non-streaming model response (timeout %s); press Ctrl+C to stop.\n", info("[Agent working]:"), agentModelTimeout)
+		}
 	case "action":
 		if event.Command != "" {
 			fmt.Printf("%s %s\n", runningLabel(), event.Command)

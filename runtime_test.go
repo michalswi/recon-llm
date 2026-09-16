@@ -254,6 +254,25 @@ func TestCallOllamaMessageWithRetryDoesNotRetryDeterministic4xx(t *testing.T) {
 	}
 }
 
+func TestCallOllamaMessageWithRetryDoesNotRetryAttemptTimeout(t *testing.T) {
+	previousTimeout := agentModelTimeout
+	agentModelTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { agentModelTimeout = previousTimeout })
+	var calls int32
+	withTestOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(100 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: "late"}})
+	})
+
+	if _, err := callOllamaMessageWithRetry(context.Background(), "test", []ChatMessage{{Role: "user", Content: "hi"}}, false, false); err == nil {
+		t.Fatal("expected an error after the request timeout")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected exactly 1 attempt after a local timeout, got %d", got)
+	}
+}
+
 func TestCallOllamaMessageWithRetryExhaustsAttemptsOnPersistentFailure(t *testing.T) {
 	withFastRetryBackoff(t, time.Millisecond)
 	var calls int32
@@ -290,4 +309,3 @@ func TestCallOllamaMessageWithRetryStopsAfterCancellation(t *testing.T) {
 		t.Fatalf("expected exactly 1 attempt before cancellation interrupted the backoff, got %d", got)
 	}
 }
-

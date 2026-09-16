@@ -186,3 +186,47 @@ func TestNonImageAttachmentNoteReachesModelPrompt(t *testing.T) {
 		t.Fatalf("system prompt does not mention attached file: %q", messages[0].Content)
 	}
 }
+
+func TestDirectoryAttachmentsUseShortExcerpts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	directory := t.TempDir()
+	content := strings.Repeat("x", maxAgentDirectoryExcerpt+1)
+	if err := os.WriteFile(filepath.Join(directory, "large.txt"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := newTerminalAgentSession(AgentRequest{Goal: "describe files", FilePath: directory})
+	if err != nil {
+		t.Fatalf("newTerminalAgentSession returned error: %v", err)
+	}
+	if strings.Contains(sess.AgentRun.AttachmentNote, content) {
+		t.Fatal("directory attachment included the complete file instead of an excerpt")
+	}
+	if !strings.Contains(sess.AgentRun.AttachmentNote, strings.Repeat("x", maxAgentDirectoryExcerpt)) {
+		t.Fatal("directory attachment did not include the expected excerpt")
+	}
+	if !strings.Contains(sess.AgentRun.AttachmentNote, "Excerpt only") {
+		t.Fatal("directory attachment did not tell the agent how to inspect more content")
+	}
+}
+
+func TestAttachmentTextHasAggregateBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	directory := t.TempDir()
+	paths := make([]string, 0, 3)
+	for _, name := range []string{"one.txt", "two.txt", "three.txt"} {
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte(strings.Repeat("~", agentMaxObservation)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+
+	sess, err := newTerminalAgentSession(AgentRequest{Goal: "describe files", FilePaths: paths})
+	if err != nil {
+		t.Fatalf("newTerminalAgentSession returned error: %v", err)
+	}
+	if got := strings.Count(sess.AgentRun.AttachmentNote, "~"); got != maxAgentAttachmentText {
+		t.Fatalf("inlined attachment text = %d bytes, want aggregate cap %d", got, maxAgentAttachmentText)
+	}
+}

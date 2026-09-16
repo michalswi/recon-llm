@@ -45,6 +45,8 @@ var ollamaNumPredict = parseIntEnv("OLLAMA_NUM_PREDICT", -1)
 // ollamaNumCtx is 0 (omitted, use the model/server default) unless set.
 var ollamaNumCtx = parseIntEnv("OLLAMA_NUM_CTX", 0)
 
+var agentModelTimeout = parseDurationEnv("RECON_MODEL_TIMEOUT", 5*time.Minute)
+
 func parseIntEnv(key string, defaultValue int) int {
 	value := utils.GetEnv(key, "")
 	if value == "" {
@@ -52,6 +54,18 @@ func parseIntEnv(key string, defaultValue int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func parseDurationEnv(key string, defaultValue time.Duration) time.Duration {
+	value := utils.GetEnv(key, "")
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
 		return defaultValue
 	}
 	return parsed

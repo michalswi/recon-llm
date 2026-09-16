@@ -22,7 +22,6 @@ import (
 const (
 	agentMaxIterations  = 30
 	agentRunTimeout     = 30 * time.Minute
-	agentModelTimeout   = 2 * time.Minute
 	agentCommandTimeout = 2 * time.Minute
 	agentMaxObservation = 32 * 1024
 	agentContextTokens  = 4096

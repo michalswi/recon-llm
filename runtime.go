@@ -544,12 +544,13 @@ func callOllamaMessageWithRetry(ctx context.Context, origin string, messages []C
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, agentModelTimeout)
 		message, err := callOllamaMessageWithLogContext(attemptCtx, origin, messages, forceJSON, think)
+		attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		if err == nil {
 			return message, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || attempt == maxAttempts || !isRetryableOllamaTransportError(err) {
+		if attemptTimedOut || ctx.Err() != nil || attempt == maxAttempts || !isRetryableOllamaTransportError(err) {
 			return ChatMessage{}, err
 		}
 		select {
