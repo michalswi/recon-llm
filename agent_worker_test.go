@@ -279,6 +279,74 @@ func TestValidateAgentActionStateAcceptsValidCompleteStepEvidence(t *testing.T) 
 	}
 }
 
+func TestVerifyAgentAnswerApprovesDespitePendingPlanStep(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":true,"feedback":"","evidenceEventIds":[1,2]}`}})
+	}))
+	defer ollama.Close()
+	previousOllamaURL := ollamaURL
+	ollamaURL = ollama.URL
+	t.Cleanup(func() { ollamaURL = previousOllamaURL })
+
+	run := &AgentRun{
+		ID:       "run-pending-plan",
+		GoalSpec: normalizeAgentGoalSpec(AgentGoalSpec{Objective: "verify if lamos.space website is up"}),
+		Events: []AgentEvent{
+			{Sequence: 1, Kind: "observation", Action: "run_command", Text: "dig lamos.space", Success: true},
+			{Sequence: 2, Kind: "observation", Action: "run_command", Text: "curl -I http://lamos.space", Success: true},
+		},
+		Plan: []AgentPlanStep{
+			{ID: 1, Status: "pending"},
+			{ID: 2, Status: "pending"},
+		},
+	}
+	sess := &agentSession{ID: "sess-pending-plan", AgentRun: run}
+
+	verification, err := verifyAgentAnswer(context.Background(), sess, "lamos.space resolves and responds with HTTP 200")
+	if err != nil {
+		t.Fatalf("verifyAgentAnswer returned error: %v", err)
+	}
+	if !verification.Approved {
+		t.Fatalf("expected critic approval to survive pending plan steps, got feedback: %q", verification.Feedback)
+	}
+	if run.Plan[0].Status != "pending" || run.Plan[1].Status != "pending" {
+		t.Fatalf("expected pending plan steps to remain unchanged for diagnostics, got: %#v", run.Plan)
+	}
+}
+
+func TestVerifyAgentAnswerCriticRejectionPreservedWithPendingPlan(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":false,"feedback":"the HTTP check was never performed","evidenceEventIds":[]}`}})
+	}))
+	defer ollama.Close()
+	previousOllamaURL := ollamaURL
+	ollamaURL = ollama.URL
+	t.Cleanup(func() { ollamaURL = previousOllamaURL })
+
+	sess := &agentSession{
+		ID: "sess-pending-plan-rejected",
+		AgentRun: &AgentRun{
+			ID:       "run-pending-plan-rejected",
+			GoalSpec: normalizeAgentGoalSpec(AgentGoalSpec{Objective: "verify if lamos.space website is up"}),
+			Events: []AgentEvent{
+				{Sequence: 1, Kind: "observation", Action: "run_command", Text: "dig lamos.space", Success: true},
+			},
+			Plan: []AgentPlanStep{{ID: 1, Status: "pending"}, {ID: 2, Status: "pending"}},
+		},
+	}
+
+	verification, err := verifyAgentAnswer(context.Background(), sess, "lamos.space resolves")
+	if err != nil {
+		t.Fatalf("verifyAgentAnswer returned error: %v", err)
+	}
+	if verification.Approved {
+		t.Fatal("expected critic rejection of genuinely unfinished work to still be respected")
+	}
+	if verification.Feedback != "the HTTP check was never performed" {
+		t.Fatalf("expected original critic feedback to be preserved, got: %q", verification.Feedback)
+	}
+}
+
 func TestVerifyAgentAnswerRejectsCriticEvidenceThatCannotProveIt(t *testing.T) {
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":true,"feedback":"","evidenceEventIds":[1]}`}})

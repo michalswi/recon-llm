@@ -762,12 +762,10 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return AgentVerification{}, errors.New("critic response must contain exactly one JSON object")
 	}
-	for _, step := range run.Plan {
-		if verification.Approved && step.Status != "completed" {
-			verification.Approved = false
-			verification.Feedback = fmt.Sprintf("plan step %d is not completed: %s", step.ID, step.Description)
-		}
-	}
+	// Plan step status is worker bookkeeping, not a completion contract: an
+	// evidence-backed critic approval must not be downgraded solely because a
+	// model-created plan step is still pending. The critic already receives
+	// the plan and can reject the candidate itself if real work is missing.
 	for _, eventID := range verification.EvidenceEventIDs {
 		if eventID <= 0 || eventID > len(run.Events) {
 			return AgentVerification{}, fmt.Errorf("critic cited nonexistent event %d", eventID)

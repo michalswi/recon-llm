@@ -113,7 +113,7 @@ The API has no authentication and can initiate commands through the agent. It is
 - Command observations truncated to 32 KiB before model reuse
 - Three consecutive model or protocol failures before failure
 - Independent critic verification before user approval
-- Evidence requirements for completed plan steps and explicit command goals
+- Evidence requirements for completed plan steps and explicit command goals; a pending plan step is advisory bookkeeping and does not by itself override an evidence-backed critic approval
 - Revision and clarification feedback retained as first-class context
 - Background jobs scoped to their owning run and cancelled during cleanup
 - Deterministic, native `list_directory` and `search_files` actions for exploring directories with many files, without shell syntax

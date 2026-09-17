@@ -110,7 +110,7 @@ The decoder requires exactly one JSON object and rejects unknown fields or trail
 - Three consecutive protocol or model failures.
 - Explicit code goals require a non-empty fenced code block.
 - Explicit command goals require a real matching command observation.
-- Completed plan steps require valid evidence event references.
+- Completed plan steps require valid evidence event references, but a pending plan step alone does not block critic approval; the plan guides execution and progress reporting, and the critic can still reject a candidate that skipped substantive planned work.
 - Candidate answers require independent critic approval before user approval.
 - Critic rejection and user feedback remain in revision context after event compaction.
 
