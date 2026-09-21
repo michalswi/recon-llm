@@ -120,6 +120,8 @@ The nominal command allowlist is defined in `comm.go`. Agent commands are valida
 
 Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination.
 
+New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `agent.txt` — don't restate or override it. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
+
 ## Product Invariants
 
 - The application is agent-only, with terminal and opt-in headless API interfaces.

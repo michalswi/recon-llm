@@ -89,29 +89,64 @@ func readInteractiveLine(reader *bufio.Reader, label string) (line string, err e
 	}
 	defer restore()
 
-	line, err = runLineEditor(reader, label, loadPromptHistory())
+	line, err = runLineEditorWithOutputAndWidth(reader, label, loadPromptHistory(), os.Stdout, platformTerminalWidth(fd))
 	return line, err, true
 }
 
 // runLineEditor implements the escape-sequence and history parsing loop; it is
 // independent of raw-mode setup so it can be exercised with a plain byte reader.
 func runLineEditor(reader *bufio.Reader, label string, history *promptHistory) (string, error) {
+	return runLineEditorWithOutput(reader, label, history, os.Stdout)
+}
+
+func runLineEditorWithOutput(reader *bufio.Reader, label string, history *promptHistory, output io.Writer) (string, error) {
+	return runLineEditorWithOutputAndWidth(reader, label, history, output, 80)
+}
+
+func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history *promptHistory, output io.Writer, terminalWidth int) (string, error) {
 	history.mu.Lock()
 	historyLen := len(history.entries)
 	history.mu.Unlock()
+	if terminalWidth <= 0 {
+		terminalWidth = 80
+	}
 
 	buffer := make([]byte, 0, 64)
 	cursor := 0
 	historyIndex := historyLen
 	var draft []byte
+	labelWidth := visibleTerminalWidth(label)
+	renderedRows := 1
+	renderedCursorRow := 0
 
 	redraw := func() {
-		fmt.Print("\r\x1b[K")
-		fmt.Print(label)
-		fmt.Print(string(buffer))
-		if moveLeft := len(buffer) - cursor; moveLeft > 0 {
-			fmt.Printf("\x1b[%dD", moveLeft)
+		fmt.Fprint(output, "\r")
+		if renderedCursorRow > 0 {
+			fmt.Fprintf(output, "\x1b[%dA", renderedCursorRow)
 		}
+		for row := 0; row < renderedRows; row++ {
+			fmt.Fprint(output, "\x1b[2K")
+			if row < renderedRows-1 {
+				fmt.Fprint(output, "\x1b[1B\r")
+			}
+		}
+		if renderedRows > 1 {
+			fmt.Fprintf(output, "\x1b[%dA", renderedRows-1)
+		}
+		fmt.Fprint(output, "\r")
+		fmt.Fprint(output, label)
+		fmt.Fprint(output, string(buffer))
+		renderedRows = terminalRows(labelWidth+len(buffer), terminalWidth)
+		endRow, _ := terminalPosition(labelWidth+len(buffer), terminalWidth)
+		cursorRow, cursorColumn := terminalPosition(labelWidth+cursor, terminalWidth)
+		fmt.Fprint(output, "\r")
+		if moveUp := endRow - cursorRow; moveUp > 0 {
+			fmt.Fprintf(output, "\x1b[%dA", moveUp)
+		}
+		if cursorColumn > 0 {
+			fmt.Fprintf(output, "\x1b[%dC", cursorColumn)
+		}
+		renderedCursorRow = cursorRow
 	}
 	redraw()
 
@@ -125,18 +160,18 @@ func runLineEditor(reader *bufio.Reader, label string, history *promptHistory) (
 		}
 		switch b {
 		case '\r', '\n':
-			fmt.Print("\r\n")
+			fmt.Fprint(output, "\r\n")
 			result := strings.TrimSpace(string(buffer))
 			if result != "" {
 				history.add(result)
 			}
 			return result, nil
 		case 3: // Ctrl+C
-			fmt.Print("\r\n")
+			fmt.Fprint(output, "\r\n")
 			return "", io.EOF
 		case 4: // Ctrl+D
 			if len(buffer) == 0 {
-				fmt.Print("\r\n")
+				fmt.Fprint(output, "\r\n")
 				return "", io.EOF
 			}
 		case 127, 8: // Backspace
@@ -186,20 +221,72 @@ func runLineEditor(reader *bufio.Reader, label string, history *promptHistory) (
 			case 'C': // Right
 				if cursor < len(buffer) {
 					cursor++
-					redraw()
+					moveEditorCursor(output, labelWidth+cursor, terminalWidth, &renderedCursorRow)
 				}
 			case 'D': // Left
 				if cursor > 0 {
 					cursor--
-					redraw()
+					moveEditorCursor(output, labelWidth+cursor, terminalWidth, &renderedCursorRow)
 				}
 			}
 		default:
 			if b >= 32 {
+				if cursor == len(buffer) {
+					buffer = append(buffer, b)
+					cursor++
+					fmt.Fprintf(output, "%c", b)
+					renderedRows = terminalRows(labelWidth+len(buffer), terminalWidth)
+					renderedCursorRow, _ = terminalPosition(labelWidth+cursor, terminalWidth)
+					continue
+				}
 				buffer = append(buffer[:cursor], append([]byte{b}, buffer[cursor:]...)...)
 				cursor++
 				redraw()
 			}
 		}
 	}
+}
+
+func terminalRows(contentWidth, terminalWidth int) int {
+	if contentWidth <= 0 {
+		return 1
+	}
+	return (contentWidth-1)/terminalWidth + 1
+}
+
+func terminalPosition(contentWidth, terminalWidth int) (row, column int) {
+	return contentWidth / terminalWidth, contentWidth % terminalWidth
+}
+
+func moveEditorCursor(output io.Writer, contentWidth, terminalWidth int, currentRow *int) {
+	targetRow, targetColumn := terminalPosition(contentWidth, terminalWidth)
+	fmt.Fprint(output, "\r")
+	if moveUp := *currentRow - targetRow; moveUp > 0 {
+		fmt.Fprintf(output, "\x1b[%dA", moveUp)
+	} else if moveDown := targetRow - *currentRow; moveDown > 0 {
+		fmt.Fprintf(output, "\x1b[%dB", moveDown)
+	}
+	if targetColumn > 0 {
+		fmt.Fprintf(output, "\x1b[%dC", targetColumn)
+	}
+	*currentRow = targetRow
+}
+
+func visibleTerminalWidth(text string) int {
+	width := 0
+	for index := 0; index < len(text); {
+		if text[index] == '\x1b' && index+1 < len(text) && text[index+1] == '[' {
+			index += 2
+			for index < len(text) && (text[index] < '@' || text[index] > '~') {
+				index++
+			}
+			if index < len(text) {
+				index++
+			}
+			continue
+		}
+		width++
+		index++
+	}
+	return width
 }

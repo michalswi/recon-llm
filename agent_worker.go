@@ -33,6 +33,10 @@ const (
 	maxAgentSearchFileSize = 2 << 20
 )
 
+var errAgentCommandPhysicalNewline = errors.New("command contains a physical newline")
+
+const agentPhysicalNewlineRevision = `Your previous command contained a physical newline after JSON decoding. Return a single-line command. If the shell must receive the two literal characters backslash+n, encode them as \\n in the JSON command string; or create ephemeral multi-line scratch input incrementally with separate single-line actions and reference the file later. Do not use scratch files to deliver source or file content.`
+
 type AgentRunStatus string
 
 const (
@@ -289,6 +293,12 @@ func runAgent(ctx context.Context, sess *agentSession) {
 			if isTruncatedAgentJSON(err) {
 				message := "Your previous response was cut off before the JSON object was fully closed (the answer was likely too long). Return the same action again, but keep the response short enough to complete: for a code deliverable, omit comments and blank lines, or split it into a smaller self-contained answer, and make sure the JSON object is fully closed."
 				if !recordAgentRevision(sess, message, nil) {
+					return
+				}
+				continue
+			}
+			if errors.Is(err, errAgentCommandPhysicalNewline) && !hasAgentRevision(run.Events, agentPhysicalNewlineRevision) {
+				if !recordAgentRevision(sess, agentPhysicalNewlineRevision, nil) {
 					return
 				}
 				continue
@@ -895,6 +905,15 @@ func isTruncatedAgentJSON(err error) bool {
 	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+func hasAgentRevision(events []AgentEvent, revision string) bool {
+	for _, event := range events {
+		if event.Kind == "verification" && event.Text == revision {
+			return true
+		}
+	}
+	return false
+}
+
 func parseAgentAction(raw string) (ToolResponse, error) {
 	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(raw)))
 	decoder.DisallowUnknownFields()
@@ -1016,8 +1035,11 @@ func validateAgentActionFieldScope(action ToolResponse) error {
 
 func validateAgentCommand(command string) error {
 	command = sanitizeCommand(command)
-	if command == "" || strings.ContainsAny(command, "\n\r") {
-		return errors.New("command must be a single physical line; heredocs and multi-line scripts are not supported. To deliver file or source content, use the answer action with the complete content in a fenced code block")
+	if command == "" {
+		return errors.New("command must not be empty")
+	}
+	if strings.ContainsAny(command, "\n\r") {
+		return fmt.Errorf("%w: command must be a single physical line; heredocs and multi-line scripts are not supported. To deliver file or source content, use the answer action with the complete content in a fenced code block", errAgentCommandPhysicalNewline)
 	}
 	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
 		return errors.New("command substitution is not allowed")

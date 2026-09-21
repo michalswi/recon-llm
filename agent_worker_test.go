@@ -438,6 +438,56 @@ func TestRunAgentTreatsTruncatedJSONAsRevisionNotFailure(t *testing.T) {
 	}
 }
 
+func TestRunAgentGivesPhysicalNewlineOneStrikeFreeCorrection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var workerAttempts int32
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var chatRequest ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&chatRequest); err != nil {
+			t.Errorf("decode ollama request: %v", err)
+		}
+		if len(chatRequest.Messages) > 0 && strings.Contains(chatRequest.Messages[0].Content, "independent critic") {
+			_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"approved":true,"feedback":"","evidenceEventIds":[]}`}})
+			return
+		}
+		if atomic.AddInt32(&workerAttempts, 1) <= 2 {
+			_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"action":"run_command","command":"echo 'first\nsecond'"}`}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ChatResponse{Message: ChatMessage{Role: "assistant", Content: `{"action":"answer","text":"done"}`}})
+	}))
+	defer ollama.Close()
+	previousURL := ollamaURL
+	ollamaURL = ollama.URL
+	t.Cleanup(func() { ollamaURL = previousURL })
+
+	sess := &agentSession{ID: "sess-physical-newline"}
+	sess.AgentRun = newAgentRun(sess.ID, "say done", "", "")
+
+	runAgent(context.Background(), sess)
+
+	run := sess.agentSnapshot()
+	if run.Status != agentWaitingApproval {
+		t.Fatalf("expected waiting_approval after recovery, got status=%q error=%q", run.Status, run.Error)
+	}
+	revisions := 0
+	failures := 0
+	for _, event := range run.Events {
+		if event.Kind == "verification" && event.Text == agentPhysicalNewlineRevision {
+			revisions++
+		}
+		if event.Kind == "error" && strings.Contains(event.Text, errAgentCommandPhysicalNewline.Error()) {
+			failures++
+		}
+	}
+	if revisions != 1 {
+		t.Fatalf("physical-newline revisions = %d, want exactly 1", revisions)
+	}
+	if failures != 1 {
+		t.Fatalf("physical-newline failures = %d, want 1 after the repeated mistake", failures)
+	}
+}
+
 func TestValidateAgentCommandCharacterizationOfExistingAcceptedForms(t *testing.T) {
 	accepted := []string{
 		`ls -la`,
@@ -465,6 +515,16 @@ func TestValidateAgentCommandCharacterizationOfExistingAcceptedForms(t *testing.
 				t.Fatalf("expected %q to be rejected", command)
 			}
 		})
+	}
+}
+
+func TestValidateAgentCommandDistinguishesShellEscapeFromPhysicalNewline(t *testing.T) {
+	if err := validateAgentCommand(`echo "first\nsecond"`); err != nil {
+		t.Fatalf("expected a literal backslash-n shell escape to be accepted, got: %v", err)
+	}
+
+	if err := validateAgentCommand("echo \"first\nsecond\""); err == nil {
+		t.Fatal("expected a physical newline in the decoded command to be rejected")
 	}
 }
 

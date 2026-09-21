@@ -9,3 +9,7 @@ import "errors"
 func platformEnableRawMode(fd int) (func() error, error) {
 	return nil, errors.New("raw terminal mode is not supported on this platform")
 }
+
+func platformTerminalWidth(fd int) int {
+	return 80
+}

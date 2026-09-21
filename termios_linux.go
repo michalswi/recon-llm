@@ -20,9 +20,17 @@ type linuxTermios struct {
 	Ospeed uint32
 }
 
+type linuxWinsize struct {
+	Rows    uint16
+	Columns uint16
+	XPixel  uint16
+	YPixel  uint16
+}
+
 const (
-	linuxTCGETS = 0x5401
-	linuxTCSETS = 0x5402
+	linuxTCGETS     = 0x5401
+	linuxTCSETS     = 0x5402
+	linuxTIOCGWINSZ = 0x5413
 
 	linuxICRNL  = 0x00000100
 	linuxIXON   = 0x00000400
@@ -63,4 +71,12 @@ func platformEnableRawMode(fd int) (func() error, error) {
 	return func() error {
 		return linuxIoctl(fd, linuxTCSETS, unsafe.Pointer(&original))
 	}, nil
+}
+
+func platformTerminalWidth(fd int) int {
+	var size linuxWinsize
+	if err := linuxIoctl(fd, linuxTIOCGWINSZ, unsafe.Pointer(&size)); err != nil || size.Columns == 0 {
+		return 80
+	}
+	return int(size.Columns)
 }

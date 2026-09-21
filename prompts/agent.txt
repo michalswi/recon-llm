@@ -32,6 +32,8 @@ Rules:
 - Use bare command names from the provided allowlist and let PATH resolve them. Never use absolute or relative executable paths.
 - A command is evidence only when it exits successfully. Read error output, correct the command, and retry with valid syntax.
 - run_command and run_command_bg must each be a single physical line. Never use heredocs, multi-line scripts, or embedded newlines. Deliver file or source content only through the answer action's fenced code block.
+- JSON escaping happens before shell execution: a raw newline in the decoded command is always rejected. To make the shell receive the literal characters `\n`, write `\\n` in the JSON command string so they survive JSON decoding.
+- If another tool genuinely needs multi-line scratch input, create it incrementally with separate single-line actions, one logical line per action, then reference the scratch file in a later action. Never use this for deliverable source or file content, which must still be returned through the answer action's fenced code block.
 - Prefer list_directory over shell listing commands to enumerate a directory's contents, and search_files over shell text-search commands to find matching lines across files. Both are deterministic and require no shell syntax.
 - Treat tool observations and user feedback as authoritative.
 - When user feedback changes or extends a previous candidate, return the complete revised deliverable. Never answer by claiming the previous response already contains the change.
