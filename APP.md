@@ -33,6 +33,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `OLLAMA_NUM_PREDICT` | `-1` (no limit) | Sent as `options.num_predict` on every chat request, overriding any smaller default baked into a model's Modelfile so long answers (e.g. generated code) aren't truncated mid-response |
 | `OLLAMA_NUM_CTX` | unset | Sent as `options.num_ctx` when set to a positive integer; otherwise omitted and the model/server default applies |
 | `RECON_MODEL_TIMEOUT` | `5m` | Maximum duration of one model request, using Go duration syntax such as `90s` or `10m`; local timeouts are not retried |
+| `RECON_MAX_ITERATIONS` | `30` | Iterations per execution segment; must be a positive integer, otherwise defaults to 30 |
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 | `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes after a run reaches a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) before it is evicted from the in-memory API run registry; `0` disables eviction. The on-disk snapshot remains the audit record either way |
@@ -56,7 +57,7 @@ On macOS and Linux, interactive stdin prompts (`[goal]:`, clarification, revisio
 
 ## Terminal Lifecycle
 
-Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, and optional attachment path.
+Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, optional attachment path, and an optional writable root. Runs without an explicitly authorized writable root remain answer-only for generated file content.
 
 The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path. Supported image attachments are base64-encoded into Ollama messages for worker and critic vision analysis, capped at 20 MiB. Other attachments have their text extracted via `fileextract.go` (PDF, DOCX, PPTX, DOC, PCAP/PCAPNG/CAP, and plain text, capped at 20 MiB) and share a 64 KiB inline-text budget per run. Files attached through a directory initially include at most a 1 KiB excerpt each; metadata and paths remain in the prompt so the worker can inspect selected files with allowed tools. If extraction fails or the file is too large, the note names the path for tool-based inspection. A plain objective can infer an existing absolute image path, while `/agent` and the API accept explicit attachment paths. `/attach` persists a file or directory's regular files across subsequent terminal runs. `/deattach`/`/detach` clears all persistent attachments, or a single one when given a path; `/attached` lists the current set. At most 30 files are attached per run. Attached file metadata is carried on the run as `AttachmentNote` and included in the objective seen by the worker and critic; images are additionally sent as native Ollama message content.
 
@@ -64,6 +65,9 @@ The worker runs synchronously and model responses are non-streaming. The termina
 
 - `waiting_input`: the terminal collects clarification and resumes with it as a cumulative requirement.
 - `waiting_approval`: the terminal displays the verified candidate and allows accept, revision feedback, or stop.
+- `waiting_continue`: the iteration budget is exhausted; the terminal offers continue [c] or stop [s]. Continuing grants fresh iteration/time budgets while preserving history, plans, requirements, attachments, and jobs.
+
+Explicit clarification and revision feedback also renew the segment budget. `iteration` remains the lifetime total; `segmentIteration` resets to zero on resumption, and `maxIterations` is the per-segment limit captured at run creation. Automatic critic revisions and retries do not renew the budget. The 30-minute active-segment deadline remains terminal (`limit_reached`), not a continuation pause.
 
 Terminal run snapshots are persisted under `~/.recon/agent_runs/<run-id>.json`. They provide an audit record; automatic restart/resume is not currently implemented.
 
@@ -71,11 +75,14 @@ Terminal run snapshots are persisted under `~/.recon/agent_runs/<run-id>.json`. 
 
 The API is enabled with `-api-address <address>` or `RECON_API_ADDRESS`; it is disabled by default and replaces the interactive terminal loop for that process. It reuses the terminal session constructor and worker rather than implementing a separate agent engine.
 
-- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object.
+- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object. Optional `writableRoots` entries must name existing directories; they authorize native `write_file` actions beneath those roots for that run.
 - `GET /api/agent/runs/{id}` returns sanitized run state, events, plans, and candidate output.
 - `POST /api/agent/runs/{id}/feedback` resumes clarification or revises a candidate.
 - `POST /api/agent/runs/{id}/approve` accepts a verified candidate.
+- `POST /api/agent/runs/{id}/continue` explicitly resumes `waiting_continue` with fresh iteration/time budgets; no request body is required. It rejects other states, including terminal runs. `/feedback` and `/approve` do not resume an iteration-limit pause.
 - `POST /api/agent/runs/{id}/cancel` cancels active work and run-owned jobs.
+
+API responses and persisted snapshots expose lifetime `iteration`, current `segmentIteration`, and per-segment `maxIterations`. The `waiting_continue` state is nonterminal and is not subject to retention eviction.
 
 The in-memory API registry is process-local. Persisted snapshots remain audit records and are not loaded after restart. The API has no authentication and must remain loopback-bound or be protected by a trusted authenticated proxy. Runs that reach a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) are evicted from the registry after `RECON_API_RUN_RETENTION_MINUTES` (default 30, `0` disables eviction); active and waiting runs are never evicted. Eviction is swept opportunistically on `POST /api/agent/runs` and `GET|POST /api/agent/runs/{id}...`, not via a background timer.
 
@@ -93,6 +100,7 @@ Supported actions are:
 - `list_jobs`
 - `list_directory`
 - `search_files`
+- `write_file`
 - `update_findings`
 - `request_clarification`
 - `answer`
@@ -101,10 +109,13 @@ The decoder requires exactly one JSON object and rejects unknown fields or trail
 
 `list_directory` and `search_files` are native Go implementations, not shell commands; they bypass the command allowlist entirely and cannot fail on shell syntax. `list_directory` walks a directory up to `maxDepth` (default and max 6), capped at 2000 entries. `search_files` runs a Go regular expression across a file or a directory's text files (skipping binaries and files over 2 MiB), capped at 200 matches.
 
+`write_file` is a native Go operation for complete file content, including multiline source. It is available only beneath existing writable roots explicitly authorized at run creation. Parent directories must already exist. Destinations default to no-overwrite; explicit overwrite replaces only an existing regular file. Writes use restrictive permissions and per-file atomic commit, are capped at 256 KiB per file, 50 files and 1 MiB per run, and record only resolved path and byte-count evidence rather than file content. Up to 32 KiB of written content is retained only in memory for the independent critic; it is excluded from API events, model history, logs, and persisted snapshots. Symlink escapes and non-regular destinations are rejected. Successful file creation completes a write-only code goal; it does not authorize building, testing, running, starting, or probing generated code.
+
 ## Limits and Verification
 
-- 30 iterations per run segment and a 30-minute segment deadline.
-- Two-minute model and foreground-command deadlines.
+- Default 30 iterations per segment, configurable through `RECON_MAX_ITERATIONS`; exhaustion pauses for explicit continuation rather than ending the run.
+- A 30-minute active-segment deadline; expiry ends the run with `limit_reached` and cleans up its jobs.
+- Configurable model-request deadline (default 5 minutes) and a two-minute foreground-command deadline.
 - 4096-token recent-event context plus a 768-token compaction instruction budget.
 - 32 KiB maximum observation size in model context.
 - Three consecutive protocol or model failures.
@@ -114,13 +125,15 @@ The decoder requires exactly one JSON object and rejects unknown fields or trail
 - Candidate answers require independent critic approval before user approval.
 - Critic rejection and user feedback remain in revision context after event compaction.
 
+`check_job` and `get_job` wait for running jobs to finish, using their completion signal rather than repeated model polling. A check consumes one iteration, but the wait consumes no additional iterations or model calls. Already-finished jobs return immediately. Cancellation and the active segment deadline interrupt the wait. `list_jobs` remains an immediate overview; repeated calls still consume iterations. Background jobs have a separate 1-hour timeout and continue during user-decision pauses, including `waiting_continue`; ending the run cleans them up.
+
 ## Command and Trust Boundary
 
 The nominal command allowlist is defined in `comm.go`. Agent commands are validated before execution, but execution is not sandboxed and uses the operating-system permissions of the recon process. Background commands use `bash -c`; run cleanup cancels jobs owned by that run.
 
 Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination.
 
-New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `agent.txt` — don't restate or override it. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
+New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `agent.txt` — don't restate or override it. Deliver requested files with `write_file`, never shell redirection or heredocs. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
 
 ## Product Invariants
 

@@ -26,6 +26,9 @@ const (
 	agentMaxObservation = 32 * 1024
 	agentContextTokens  = 4096
 	agentSummaryTokens  = 768
+	agentMaxWriteSize   = 256 * 1024
+	agentMaxWriteBytes  = 1024 * 1024
+	agentMaxWriteFiles  = 50
 
 	maxAgentListEntries    = 2000
 	maxAgentListDepth      = 6
@@ -35,7 +38,7 @@ const (
 
 var errAgentCommandPhysicalNewline = errors.New("command contains a physical newline")
 
-const agentPhysicalNewlineRevision = `Your previous command contained a physical newline after JSON decoding. Return a single-line command. If the shell must receive the two literal characters backslash+n, encode them as \\n in the JSON command string; or create ephemeral multi-line scratch input incrementally with separate single-line actions and reference the file later. Do not use scratch files to deliver source or file content.`
+const agentPhysicalNewlineRevision = `Your previous command contained a physical newline after JSON decoding. Return a single-line command. If the shell must receive the two literal characters backslash+n, encode them as \\n in the JSON command string; or create ephemeral multi-line scratch input incrementally with separate single-line actions and reference the file later. For requested files under an authorized writable root, use write_file. For code requested in the response, use answer with a fenced code block.`
 
 type AgentRunStatus string
 
@@ -43,6 +46,7 @@ const (
 	agentRunning         AgentRunStatus = "running"
 	agentWaitingApproval AgentRunStatus = "waiting_approval"
 	agentWaitingInput    AgentRunStatus = "waiting_input"
+	agentWaitingContinue AgentRunStatus = "waiting_continue"
 	agentCompleted       AgentRunStatus = "completed"
 	agentFailed          AgentRunStatus = "failed"
 	agentCancelled       AgentRunStatus = "cancelled"
@@ -55,12 +59,15 @@ type AgentEvent struct {
 	Action           string    `json:"action,omitempty"`
 	Text             string    `json:"text,omitempty"`
 	Command          string    `json:"command,omitempty"`
+	Path             string    `json:"path,omitempty"`
+	BytesWritten     int       `json:"bytesWritten,omitempty"`
 	Output           string    `json:"output,omitempty"`
 	Success          bool      `json:"success,omitempty"`
 	StepID           int       `json:"stepId,omitempty"`
 	EvidenceEventIDs []int     `json:"evidenceEventIds,omitempty"`
 	Thinking         string    `json:"thinking,omitempty"`
 	CreatedAt        time.Time `json:"createdAt"`
+	FileContent      string    `json:"-"`
 }
 
 type AgentRun struct {
@@ -70,6 +77,7 @@ type AgentRun struct {
 	GoalSpec            AgentGoalSpec   `json:"goalSpec"`
 	Status              AgentRunStatus  `json:"status"`
 	Iteration           int             `json:"iteration"`
+	SegmentIteration    int             `json:"segmentIteration"`
 	MaxIterations       int             `json:"maxIterations"`
 	StartedAt           time.Time       `json:"startedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt"`
@@ -83,6 +91,9 @@ type AgentRun struct {
 	AvailableCommands   []string        `json:"availableCommands"`
 	UnavailableCommands []string        `json:"unavailableCommands,omitempty"`
 	WorkingDirectory    string          `json:"workingDirectory"`
+	WritableRoots       []string        `json:"writableRoots,omitempty"`
+	WrittenFiles        int             `json:"writtenFiles,omitempty"`
+	WrittenBytes        int             `json:"writtenBytes,omitempty"`
 	OperatingSystem     string          `json:"operatingSystem"`
 	ContextSummary      string          `json:"contextSummary,omitempty"`
 	CompactedThrough    int             `json:"compactedThrough,omitempty"`
@@ -122,7 +133,7 @@ func newAgentRun(sessionID, goal, basePrompt, basePromptName string) *AgentRun {
 		Goal:                goal,
 		GoalSpec:            normalizeAgentGoalSpec(AgentGoalSpec{Objective: goal}),
 		Status:              agentRunning,
-		MaxIterations:       agentMaxIterations,
+		MaxIterations:       agentIterationLimit,
 		StartedAt:           now,
 		UpdatedAt:           now,
 		BasePrompt:          basePrompt,
@@ -205,6 +216,7 @@ func (s *agentSession) agentSnapshot() *AgentRun {
 	snapshot.Events = append([]AgentEvent(nil), s.AgentRun.Events...)
 	snapshot.CandidateHistory = append([]string(nil), s.AgentRun.CandidateHistory...)
 	snapshot.UserRequirements = append([]string(nil), s.AgentRun.UserRequirements...)
+	snapshot.WritableRoots = append([]string(nil), s.AgentRun.WritableRoots...)
 	snapshot.Plan = clonePlanSteps(s.AgentRun.Plan)
 	return &snapshot
 }
@@ -250,10 +262,6 @@ func runAgent(ctx context.Context, sess *agentSession) {
 		if run == nil || run.Status != agentRunning {
 			return
 		}
-		if run.Iteration >= run.MaxIterations {
-			finishAgent(sess, agentLimitReached, "", "maximum iteration limit reached")
-			return
-		}
 		select {
 		case <-ctx.Done():
 			status := agentCancelled
@@ -264,9 +272,23 @@ func runAgent(ctx context.Context, sess *agentSession) {
 			return
 		default:
 		}
+		if run.SegmentIteration >= run.MaxIterations {
+			sess.mu.Lock()
+			if sess.AgentRun.Status != agentRunning {
+				sess.mu.Unlock()
+				return
+			}
+			sess.AgentRun.Status = agentWaitingContinue
+			sess.AgentRun.UpdatedAt = time.Now().UTC()
+			sess.AwaitingDecision = true
+			sess.mu.Unlock()
+			sess.appendAgentEvent(AgentEvent{Kind: "status", Text: "Iteration budget reached; continue or stop."})
+			return
+		}
 
 		sess.mu.Lock()
 		sess.AgentRun.Iteration++
+		sess.AgentRun.SegmentIteration++
 		sess.AgentRun.UpdatedAt = time.Now().UTC()
 		sess.mu.Unlock()
 		compactAgentContext(ctx, sess)
@@ -323,7 +345,7 @@ func runAgent(ctx context.Context, sess *agentSession) {
 			continue
 		}
 		if action.Action == "answer" {
-			if goalRequiresCodeDeliverable(run) && !candidateHasCodeBlock(action.Text) {
+			if goalRequiresCodeDeliverable(run) && !hasSuccessfulFileWrite(run.Events) && !candidateHasCodeBlock(action.Text) {
 				logAgentHeuristic(run.ID, "goalRequiresCodeDeliverable", "blocked candidate answer with no fenced code block")
 				message := "The goal requires source code, but the candidate contains no non-empty fenced code block. Return the complete runnable code directly in the answer."
 				sess.appendAgentEvent(AgentEvent{Kind: "candidate", Action: "answer", Text: action.Text, Thinking: response.Thinking})
@@ -362,7 +384,7 @@ func runAgent(ctx context.Context, sess *agentSession) {
 			action.EvidenceEventIDs = append([]int(nil), verification.EvidenceEventIDs...)
 		}
 		resetAgentFailures(sess)
-		sess.appendAgentEvent(AgentEvent{Kind: "action", Action: action.Action, Text: action.Text, Command: action.Command, EvidenceEventIDs: action.EvidenceEventIDs, Thinking: response.Thinking})
+		sess.appendAgentEvent(AgentEvent{Kind: "action", Action: action.Action, Text: action.Text, Command: action.Command, Path: action.Path, EvidenceEventIDs: action.EvidenceEventIDs, Thinking: response.Thinking})
 		if err := sess.persist(); err != nil {
 			finishAgent(sess, agentFailed, "", "could not persist action before execution: "+err.Error())
 			return
@@ -390,7 +412,7 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	prompt += fmt.Sprintf("\n\nEXECUTION ENVIRONMENT:\nOS: %s\nWorking directory: %s\nCommands installed and allowed: %s\nAllowed but unavailable: %s\nCommands run with the same filesystem and network permissions as the recon process.", run.OperatingSystem, run.WorkingDirectory, strings.Join(run.AvailableCommands, ", "), emptyAgentValue(strings.Join(run.UnavailableCommands, ", ")))
+	prompt += fmt.Sprintf("\n\nEXECUTION ENVIRONMENT:\nOS: %s\nWorking directory: %s\nWritable roots: %s\nCommands installed and allowed: %s\nAllowed but unavailable: %s\nCommands run with the same filesystem and network permissions as the recon process.", run.OperatingSystem, run.WorkingDirectory, emptyAgentValue(strings.Join(run.WritableRoots, ", ")), strings.Join(run.AvailableCommands, ", "), emptyAgentValue(strings.Join(run.UnavailableCommands, ", ")))
 	if revisionContext := agentRevisionContext(run); revisionContext != "" {
 		prompt += "\n\nREVISION CONTEXT:\n" + revisionContext + "\nReturn a self-contained candidate containing the complete updated deliverable. Never claim that a previous response contains a requested change; include the changed result in this answer."
 	}
@@ -417,7 +439,7 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 			if event.Kind == "invalid_action" {
 				messages = append(messages, ChatMessage{Role: "assistant", Content: event.Text})
 			} else {
-				content, _ := json.Marshal(ToolResponse{Action: event.Action, Command: event.Command, Text: event.Text, StepID: event.StepID, EvidenceEventIDs: event.EvidenceEventIDs})
+				content, _ := json.Marshal(ToolResponse{Action: event.Action, Command: event.Command, Path: event.Path, Text: event.Text, StepID: event.StepID, EvidenceEventIDs: event.EvidenceEventIDs})
 				messages = append(messages, ChatMessage{Role: "assistant", Content: string(content)})
 			}
 		case "observation", "error":
@@ -491,15 +513,24 @@ func agentGoalFields(goal string) []string {
 
 func hasCommandObservation(events []AgentEvent, requiredCommand string) bool {
 	for _, event := range events {
-		if event.Kind != "observation" || event.Action != "run_command" || !event.Success {
-			continue
-		}
-		fields := strings.Fields(event.Command)
-		if len(fields) > 0 && fields[0] == requiredCommand {
+		if commandObservationSupports(event, requiredCommand) {
 			return true
 		}
 	}
 	return false
+}
+
+func commandObservationSupports(event AgentEvent, requiredCommand string) bool {
+	if event.Kind != "observation" || !event.Success {
+		return false
+	}
+	switch event.Action {
+	case "run_command", "check_job", "get_job":
+	default:
+		return false
+	}
+	fields := strings.Fields(event.Command)
+	return len(fields) > 0 && fields[0] == requiredCommand
 }
 
 func goalRequiresCodeDeliverable(run *AgentRun) bool {
@@ -534,6 +565,15 @@ func candidateHasCodeBlock(candidate string) bool {
 	contentStart += start + 4
 	end := strings.Index(candidate[contentStart:], "```")
 	return end > 0 && strings.TrimSpace(candidate[contentStart:contentStart+end]) != ""
+}
+
+func hasSuccessfulFileWrite(events []AgentEvent) bool {
+	for _, event := range events {
+		if event.Kind == "observation" && event.Action == "write_file" && event.Success {
+			return true
+		}
+	}
+	return false
 }
 
 func latestAgentCommandFailure(events []AgentEvent) (string, bool) {
@@ -581,6 +621,9 @@ func consecutiveAgentCommandFailures(events []AgentEvent) int {
 }
 
 func validateAgentActionState(sess *agentSession, run *AgentRun, action ToolResponse) error {
+	if action.Action == "write_file" && len(run.WritableRoots) == 0 {
+		return errors.New("write_file requires an explicitly authorized writable root")
+	}
 	if action.Action == "check_job" || action.Action == "get_job" || action.Action == "cancel_job" {
 		job, ok := jobStore.get(action.JobID)
 		if !ok || job.SessionID != sess.ID || job.RunID != run.ID {
@@ -755,6 +798,9 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 		userContent += "\n\nEARLIER RUN SUMMARY:\n" + run.ContextSummary
 	}
 	userContent += "\n\nCANDIDATE ANSWER:\n" + candidate + "\n\nRECORDED EVENTS:\n" + string(evidenceJSON)
+	if writtenFiles := agentWrittenFileContents(run.Events); writtenFiles != "" {
+		userContent += "\n\nWRITTEN FILE CONTENT (in-memory critic evidence; not persisted or exposed by the API):\n" + writtenFiles
+	}
 	messages := []ChatMessage{
 		{Role: "system", Content: "You are an independent critic. Verify the exact candidate agent-agent answer against the objective, expected output, constraints, completion criteria, plan, user feedback, and recorded events. Approve only if the candidate itself contains the complete requested deliverable. Never assume promised, described, or omitted content exists; a preamble without its claimed output is incomplete. Return exactly one JSON object: {\"approved\":true|false,\"feedback\":\"specific reason or empty\",\"evidenceEventIds\":[1,2]}. Cite only event IDs that directly support the answer. Knowledge-only answers may use an empty evidence list."},
 		{Role: "user", Content: userContent, Images: agentImages(sess)},
@@ -809,6 +855,28 @@ func agentCriticEvidence(events []AgentEvent) []AgentEvent {
 	return evidence
 }
 
+func agentWrittenFileContents(events []AgentEvent) string {
+	var content strings.Builder
+	seen := make(map[string]bool)
+	for _, event := range events {
+		if event.Kind != "observation" || event.Action != "write_file" || !event.Success || event.Path == "" || seen[event.Path] {
+			continue
+		}
+		seen[event.Path] = true
+		entry := fmt.Sprintf("FILE: %s\n%s\n", event.Path, event.FileContent)
+		remaining := agentMaxObservation - content.Len()
+		if remaining <= 0 {
+			break
+		}
+		if len(entry) > remaining {
+			content.WriteString(entry[:remaining])
+			break
+		}
+		content.WriteString(entry)
+	}
+	return strings.TrimSpace(content.String())
+}
+
 func agentRevisionContext(run *AgentRun) string {
 	if len(run.CandidateHistory) == 0 && len(run.UserRequirements) == 0 {
 		return ""
@@ -835,9 +903,7 @@ func agentRevisionContext(run *AgentRun) string {
 
 func evidenceSupportsCommand(events []AgentEvent, evidenceIDs []int, command string) bool {
 	for _, eventID := range evidenceIDs {
-		event := events[eventID-1]
-		fields := strings.Fields(event.Command)
-		if event.Kind == "observation" && event.Action == "run_command" && event.Success && len(fields) > 0 && fields[0] == command {
+		if commandObservationSupports(events[eventID-1], command) {
 			return true
 		}
 	}
@@ -866,7 +932,7 @@ func agentEvidenceEventIsValid(event AgentEvent) bool {
 	switch event.Kind {
 	case "observation":
 		switch event.Action {
-		case "run_command", "list_directory", "search_files":
+		case "run_command", "list_directory", "search_files", "write_file":
 			// A successful foreground/native observation can prove its own result;
 			// a failed one proves nothing positive.
 			return event.Success
@@ -949,6 +1015,16 @@ func parseAgentAction(raw string) (ToolResponse, error) {
 		if _, err := regexp.Compile(action.Pattern); err != nil {
 			return ToolResponse{}, fmt.Errorf("invalid search pattern: %w", err)
 		}
+	case "write_file":
+		if strings.TrimSpace(action.Path) == "" {
+			return ToolResponse{}, errors.New("action write_file requires path")
+		}
+		if action.Content == nil {
+			return ToolResponse{}, errors.New("action write_file requires content")
+		}
+		if len(*action.Content) > agentMaxWriteSize {
+			return ToolResponse{}, fmt.Errorf("write_file content exceeds %d byte limit", agentMaxWriteSize)
+		}
 	case "create_plan":
 		if len(action.Steps) == 0 {
 			return ToolResponse{}, errors.New("action create_plan requires at least one step")
@@ -986,6 +1062,7 @@ var agentActionAllowedFields = map[string]map[string]bool{
 	"list_jobs":             {},
 	"list_directory":        {"path": true, "maxDepth": true},
 	"search_files":          {"path": true, "pattern": true},
+	"write_file":            {"path": true, "content": true, "overwrite": true},
 	"create_plan":           {"steps": true},
 	"complete_step":         {"stepId": true, "evidenceEventIds": true},
 }
@@ -1004,6 +1081,12 @@ func validateAgentActionFieldScope(action ToolResponse) error {
 	}
 	if action.Path != "" && !allowed["path"] {
 		stray = append(stray, "path")
+	}
+	if action.Content != nil && !allowed["content"] {
+		stray = append(stray, "content")
+	}
+	if action.Overwrite != nil && !allowed["overwrite"] {
+		stray = append(stray, "overwrite")
 	}
 	if action.Pattern != "" && !allowed["pattern"] {
 		stray = append(stray, "pattern")
@@ -1039,7 +1122,7 @@ func validateAgentCommand(command string) error {
 		return errors.New("command must not be empty")
 	}
 	if strings.ContainsAny(command, "\n\r") {
-		return fmt.Errorf("%w: command must be a single physical line; heredocs and multi-line scripts are not supported. To deliver file or source content, use the answer action with the complete content in a fenced code block", errAgentCommandPhysicalNewline)
+		return fmt.Errorf("%w: command must be a single physical line; heredocs and multi-line scripts are not supported. Use write_file for requested files under an authorized writable root, or answer with a fenced code block for code requested in the response", errAgentCommandPhysicalNewline)
 	}
 	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
 		return errors.New("command substitution is not allowed")
@@ -1285,17 +1368,43 @@ func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResp
 		output, success := searchAgentFiles(action.Path, action.Pattern)
 		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("search_files path=%q pattern=%q", action.Path, action.Pattern), Output: truncateAgentText(output), Success: success})
 		return true
+	case "write_file":
+		path, bytesWritten, err := writeAgentFile(sess, action)
+		if err != nil {
+			sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Path: path, Text: err.Error(), Success: false})
+			return true
+		}
+		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Path: path, BytesWritten: bytesWritten, Text: fmt.Sprintf("wrote %d bytes to %s", bytesWritten, path), Success: true, FileContent: *action.Content})
+		return true
 	case "check_job", "get_job":
 		job, ok := jobStore.get(action.JobID)
 		if !ok || job.SessionID != sess.ID {
 			sess.appendAgentEvent(AgentEvent{Kind: "error", Action: action.Action, Text: "job not found"})
 			return true
 		}
+		if job.Status == "running" {
+			sess.appendAgentEvent(AgentEvent{Kind: "status", Action: action.Action, Text: fmt.Sprintf("Waiting for job %s; cancellation and the run deadline remain active.", job.ID)})
+			select {
+			case <-ctx.Done():
+				status := agentCancelled
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					status = agentLimitReached
+				}
+				finishAgent(sess, status, "", ctx.Err().Error())
+				return false
+			case <-job.Done:
+			}
+			job, ok = jobStore.get(action.JobID)
+			if !ok {
+				sess.appendAgentEvent(AgentEvent{Kind: "error", Action: action.Action, Text: "job not found"})
+				return true
+			}
+		}
 		output := job.Output
 		if action.Action == "check_job" && len(output) > 1000 {
 			output = output[:1000] + "\n... (truncated)"
 		}
-		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Text: fmt.Sprintf("job %s status: %s\n", job.ID, job.Status), Output: truncateAgentText(output)})
+		sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Command: job.Command, Text: fmt.Sprintf("job %s status: %s\n", job.ID, job.Status), Output: truncateAgentText(output), Success: job.Status == "completed"})
 		return true
 	case "cancel_job":
 		jobStore.cancel(action.JobID, sess.ID)
@@ -1314,6 +1423,91 @@ func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResp
 		return true
 	}
 	return true
+}
+
+func writeAgentFile(sess *agentSession, action ToolResponse) (string, int, error) {
+	run := sess.agentSnapshot()
+	if run == nil {
+		return "", 0, errors.New("agent run not found")
+	}
+	if action.Content == nil {
+		return "", 0, errors.New("write_file content is required")
+	}
+	content := []byte(*action.Content)
+	if len(content) > agentMaxWriteSize {
+		return "", 0, fmt.Errorf("write_file content exceeds %d byte limit", agentMaxWriteSize)
+	}
+	if run.WrittenFiles >= agentMaxWriteFiles || run.WrittenBytes+len(content) > agentMaxWriteBytes {
+		return "", 0, errors.New("write_file run limit exceeded")
+	}
+	absolutePath, err := filepath.Abs(strings.TrimSpace(action.Path))
+	if err != nil {
+		return "", 0, fmt.Errorf("resolve write path: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(absolutePath))
+	if err != nil {
+		return absolutePath, 0, fmt.Errorf("resolve write parent: %w", err)
+	}
+	authorized := false
+	for _, root := range run.WritableRoots {
+		canonicalRoot, rootErr := filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			continue
+		}
+		relative, relErr := filepath.Rel(canonicalRoot, parent)
+		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			authorized = true
+			break
+		}
+	}
+	if !authorized {
+		return absolutePath, 0, fmt.Errorf("write path %q is outside authorized writable roots", absolutePath)
+	}
+	resolvedPath := filepath.Join(parent, filepath.Base(absolutePath))
+	if info, statErr := os.Lstat(resolvedPath); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return resolvedPath, 0, fmt.Errorf("write destination %q is not a regular file", resolvedPath)
+		}
+		if action.Overwrite == nil || !*action.Overwrite {
+			return resolvedPath, 0, fmt.Errorf("write destination %q already exists", resolvedPath)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return resolvedPath, 0, fmt.Errorf("inspect write destination: %w", statErr)
+	}
+	temp, err := os.CreateTemp(parent, ".recon-write-*")
+	if err != nil {
+		return resolvedPath, 0, fmt.Errorf("create temporary file: %w", err)
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+	if err := temp.Chmod(0600); err != nil {
+		return resolvedPath, 0, fmt.Errorf("set temporary file permissions: %w", err)
+	}
+	if _, err := temp.Write(content); err != nil {
+		return resolvedPath, 0, fmt.Errorf("write temporary file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		return resolvedPath, 0, fmt.Errorf("sync temporary file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return resolvedPath, 0, fmt.Errorf("close temporary file: %w", err)
+	}
+	if action.Overwrite != nil && *action.Overwrite {
+		err = os.Rename(tempPath, resolvedPath)
+	} else {
+		err = os.Link(tempPath, resolvedPath)
+	}
+	if err != nil {
+		return resolvedPath, 0, fmt.Errorf("commit write: %w", err)
+	}
+	sess.mu.Lock()
+	sess.AgentRun.WrittenFiles++
+	sess.AgentRun.WrittenBytes += len(content)
+	sess.mu.Unlock()
+	return resolvedPath, len(content), nil
 }
 
 func runAgentCommand(ctx context.Context, command string) (string, bool) {

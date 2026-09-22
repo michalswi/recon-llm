@@ -122,6 +122,8 @@ type ToolResponse struct {
 	Action           string   `json:"action"`
 	Command          string   `json:"command,omitempty"`
 	Path             string   `json:"path,omitempty"`
+	Content          *string  `json:"content,omitempty"`
+	Overwrite        *bool    `json:"overwrite,omitempty"`
 	Pattern          string   `json:"pattern,omitempty"`
 	MaxDepth         int      `json:"maxDepth,omitempty"`
 	Text             string   `json:"text,omitempty"`
@@ -257,6 +259,7 @@ func cloneAgentRun(run *AgentRun) *AgentRun {
 	clone.Events = append([]AgentEvent(nil), run.Events...)
 	clone.CandidateHistory = append([]string(nil), run.CandidateHistory...)
 	clone.UserRequirements = append([]string(nil), run.UserRequirements...)
+	clone.WritableRoots = append([]string(nil), run.WritableRoots...)
 	clone.Plan = clonePlanSteps(run.Plan)
 	return &clone
 }

@@ -29,10 +29,12 @@ type AgentRequest struct {
 	CompletionCriteria string   `json:"completionCriteria,omitempty"`
 	FilePath           string   `json:"filePath,omitempty"`
 	FilePaths          []string `json:"filePaths,omitempty"`
+	WritableRoots      []string `json:"writableRoots,omitempty"`
 }
 
 const (
 	maxAgentAttachments         = 30
+	maxAgentWritableRoots       = 8
 	maxAgentImageSize           = 20 << 20
 	maxAgentDocumentExtractSize = 20 << 20
 	maxAgentAttachmentText      = 64 << 10
@@ -272,6 +274,16 @@ func readStructuredAgentRequest(reader *bufio.Reader, initialGoal string) (Agent
 		return AgentRequest{}, err
 	}
 	request.FilePath, err = promptLine(reader, "Attachment path (optional): ")
+	if err != nil {
+		return AgentRequest{}, err
+	}
+	writableRoot, err := promptLine(reader, "Writable root (optional): ")
+	if errors.Is(err, io.EOF) {
+		return request, nil
+	}
+	if strings.TrimSpace(writableRoot) != "" {
+		request.WritableRoots = []string{writableRoot}
+	}
 	return request, err
 }
 
@@ -308,6 +320,23 @@ func runTerminalAgent(reader *bufio.Reader, request AgentRequest) error {
 		}
 
 		switch run.Status {
+		case agentWaitingContinue:
+			decision, err := promptLine(reader, "Iteration budget reached. Continue [c] or stop [s]: ")
+			if err != nil {
+				finishAgent(sess, agentCancelled, "", "continuation input closed")
+				_ = sess.persist()
+				return err
+			}
+			switch strings.ToLower(decision) {
+			case "c", "continue":
+				resumeAgent(sess, "")
+			case "s", "stop":
+				finishAgent(sess, agentCancelled, "", "stopped by user")
+				_ = sess.persist()
+				return nil
+			default:
+				fmt.Println(warn("Choose c or s."))
+			}
 		case agentWaitingInput:
 			feedback, err := promptLine(reader, "Clarification: ")
 			if err != nil {
@@ -379,6 +408,10 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	attachmentPaths = appendUniquePaths(nil, attachmentPaths...)
 	if len(attachmentPaths) > maxAgentAttachments {
 		return nil, fmt.Errorf("more than %d attachment paths provided", maxAgentAttachments)
+	}
+	writableRoots, err := resolveAgentWritableRoots(request.WritableRoots)
+	if err != nil {
+		return nil, err
 	}
 
 	sessionID := fmt.Sprintf("run_%d", time.Now().UnixNano())
@@ -464,6 +497,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		return nil, fmt.Errorf("load agent prompt: %w", err)
 	}
 	run := newAgentRun(sessionID, goalDescription, systemPrompt, systemPromptName)
+	run.WritableRoots = writableRoots
 	run.AttachmentNote = strings.TrimSpace(attachmentNote.String())
 	run.GoalSpec = normalizeAgentGoalSpec(AgentGoalSpec{
 		Objective:          request.Goal,
@@ -476,6 +510,36 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		return nil, err
 	}
 	return sess, nil
+}
+
+func resolveAgentWritableRoots(paths []string) ([]string, error) {
+	if len(paths) > maxAgentWritableRoots {
+		return nil, fmt.Errorf("more than %d writable roots provided", maxAgentWritableRoots)
+	}
+	resolved := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		absolutePath, err := filepath.Abs(strings.TrimSpace(path))
+		if err != nil {
+			return nil, fmt.Errorf("resolve writable root: %w", err)
+		}
+		canonicalPath, err := filepath.EvalSymlinks(absolutePath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve writable root %q: %w", path, err)
+		}
+		info, err := os.Stat(canonicalPath)
+		if err != nil {
+			return nil, fmt.Errorf("open writable root %q: %w", path, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("writable root %q is not a directory", path)
+		}
+		if !seen[canonicalPath] {
+			seen[canonicalPath] = true
+			resolved = append(resolved, canonicalPath)
+		}
+	}
+	return resolved, nil
 }
 
 func attachmentTextExcerpt(text string, perFileLimit, remaining int) (string, bool) {
@@ -580,9 +644,15 @@ func appendUniquePaths(existing []string, paths ...string) []string {
 
 func resumeAgent(sess *agentSession, feedback string) {
 	feedback = strings.TrimSpace(feedback)
-	sess.appendAgentEvent(AgentEvent{Kind: "feedback", Text: feedback})
+	if feedback != "" {
+		sess.appendAgentEvent(AgentEvent{Kind: "feedback", Text: feedback})
+	}
 	sess.mu.Lock()
-	sess.AgentRun.UserRequirements = append(sess.AgentRun.UserRequirements, feedback)
+	if feedback != "" {
+		sess.AgentRun.UserRequirements = append(sess.AgentRun.UserRequirements, feedback)
+	}
+	sess.AgentRun.SegmentIteration = 0
+	sess.AgentRun.ConsecutiveErrors = 0
 	sess.AwaitingDecision = false
 	sess.AgentMode = true
 	sess.AgentRun.Status = agentRunning
@@ -596,6 +666,8 @@ func printAgentEvent(event AgentEvent) {
 	case "status":
 		if event.Text == "Agent run started" {
 			fmt.Printf("%s waiting for non-streaming model response (timeout %s); press Ctrl+C to stop.\n", info("[Agent working]:"), agentModelTimeout)
+		} else if event.Action == "check_job" || event.Action == "get_job" {
+			fmt.Println(info("[Agent working]:"), event.Text)
 		}
 	case "action":
 		if event.Command != "" {
@@ -641,7 +713,7 @@ func promptLine(reader *bufio.Reader, label string) (string, error) {
 	}
 	fmt.Print(accent(label))
 	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil && (!errors.Is(err, io.EOF) || strings.TrimSpace(line) == "") {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil

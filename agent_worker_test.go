@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestListAgentDirectoryRespectsDepthAndLists(t *testing.T) {
@@ -223,6 +226,8 @@ func TestAgentEvidenceEventIsValid(t *testing.T) {
 		{"failed run_command", AgentEvent{Kind: "observation", Action: "run_command", Success: false}, false},
 		{"successful list_directory", AgentEvent{Kind: "observation", Action: "list_directory", Success: true}, true},
 		{"failed search_files", AgentEvent{Kind: "observation", Action: "search_files", Success: false}, false},
+		{"successful write_file", AgentEvent{Kind: "observation", Action: "write_file", Success: true}, true},
+		{"failed write_file", AgentEvent{Kind: "observation", Action: "write_file", Success: false}, false},
 		{"run_command_bg start", AgentEvent{Kind: "observation", Action: "run_command_bg", Success: false}, true},
 		{"get_job completed", AgentEvent{Kind: "observation", Action: "get_job", Text: "job job_1 status: completed\n"}, true},
 		{"check_job running", AgentEvent{Kind: "observation", Action: "check_job", Text: "job job_1 status: running\n"}, false},
@@ -244,6 +249,184 @@ func TestAgentEvidenceEventIsValid(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := agentEvidenceEventIsValid(tc.event); got != tc.want {
 				t.Fatalf("agentEvidenceEventIsValid(%#v) = %v, want %v", tc.event, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAgentActionWriteFile(t *testing.T) {
+	action, err := parseAgentAction(`{"action":"write_file","path":"/tmp/main.go","content":"package main\n\nfunc main() {}\n"}`)
+	if err != nil {
+		t.Fatalf("parseAgentAction returned error: %v", err)
+	}
+	if action.Content == nil || *action.Content != "package main\n\nfunc main() {}\n" {
+		t.Fatalf("unexpected write content: %#v", action.Content)
+	}
+	if _, err := parseAgentAction(`{"action":"write_file","path":"/tmp/empty","content":"","overwrite":false}`); err != nil {
+		t.Fatalf("empty file content should be accepted: %v", err)
+	}
+	for _, raw := range []string{
+		`{"action":"write_file","content":"x"}`,
+		`{"action":"write_file","path":"/tmp/x"}`,
+		`{"action":"answer","text":"done","content":"x"}`,
+		`{"action":"answer","text":"done","overwrite":false}`,
+	} {
+		if _, err := parseAgentAction(raw); err == nil {
+			t.Fatalf("expected invalid write action to be rejected: %s", raw)
+		}
+	}
+	oversized, _ := json.Marshal(ToolResponse{Action: "write_file", Path: "/tmp/large", Content: stringPointer(strings.Repeat("x", agentMaxWriteSize+1))})
+	if _, err := parseAgentAction(string(oversized)); err == nil {
+		t.Fatal("expected oversized write content to be rejected")
+	}
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
+func TestWriteAgentFileConfinementAndOverwrite(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	outside, _ = filepath.EvalSymlinks(outside)
+	sess := &agentSession{ID: "write-session", AgentRun: &AgentRun{ID: "write-run", WritableRoots: []string{root}}}
+	content := "package main\n\nfunc main() {}\n"
+	path := filepath.Join(root, "main.go")
+
+	resolved, bytesWritten, err := writeAgentFile(sess, ToolResponse{Action: "write_file", Path: path, Content: &content})
+	if err != nil {
+		t.Fatalf("writeAgentFile returned error: %v", err)
+	}
+	if resolved != path || bytesWritten != len(content) {
+		t.Fatalf("write result = (%q, %d), want (%q, %d)", resolved, bytesWritten, path, len(content))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != content {
+		t.Fatalf("written file = %q, %v", data, err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("written mode = %v, %v", info.Mode().Perm(), err)
+	}
+
+	replacement := "replacement\n"
+	if _, _, err := writeAgentFile(sess, ToolResponse{Action: "write_file", Path: path, Content: &replacement}); err == nil {
+		t.Fatal("expected overwrite without explicit authorization to fail")
+	}
+	overwrite := true
+	if _, _, err := writeAgentFile(sess, ToolResponse{Action: "write_file", Path: path, Content: &replacement, Overwrite: &overwrite}); err != nil {
+		t.Fatalf("explicit overwrite failed: %v", err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != replacement {
+		t.Fatalf("overwritten file = %q", data)
+	}
+
+	escape := filepath.Join(outside, "escape.go")
+	if _, _, err := writeAgentFile(sess, ToolResponse{Action: "write_file", Path: escape, Content: &content}); err == nil {
+		t.Fatal("expected write outside authorized root to fail")
+	}
+	parentLink := filepath.Join(root, "outside-link")
+	if err := os.Symlink(outside, parentLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := writeAgentFile(sess, ToolResponse{Action: "write_file", Path: filepath.Join(parentLink, "escape.go"), Content: &content}); err == nil {
+		t.Fatal("expected symlink parent escape to fail")
+	}
+	target := filepath.Join(outside, "target.go")
+	if err := os.WriteFile(target, []byte("safe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destinationLink := filepath.Join(root, "destination-link.go")
+	if err := os.Symlink(target, destinationLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := writeAgentFile(sess, ToolResponse{Action: "write_file", Path: destinationLink, Content: &content, Overwrite: &overwrite}); err == nil {
+		t.Fatal("expected symlink destination to fail")
+	}
+	if data, _ := os.ReadFile(target); string(data) != "safe" {
+		t.Fatalf("symlink target was modified: %q", data)
+	}
+	if temporary, _ := filepath.Glob(filepath.Join(root, ".recon-write-*")); len(temporary) != 0 {
+		t.Fatalf("temporary write files were not cleaned up: %v", temporary)
+	}
+}
+
+func TestExecuteWriteFileRecordsMetadataAndLimits(t *testing.T) {
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	sess := &agentSession{ID: "write-events", AgentRun: &AgentRun{ID: "write-events-run", WritableRoots: []string{root}}}
+	content := "line one\nline two\n"
+	path := filepath.Join(root, "notes.txt")
+	if !executeAgentAction(context.Background(), sess, ToolResponse{Action: "write_file", Path: path, Content: &content}) {
+		t.Fatal("write_file stopped agent execution")
+	}
+	run := sess.agentSnapshot()
+	if len(run.Events) != 1 || !run.Events[0].Success || run.Events[0].Path != path || run.Events[0].BytesWritten != len(content) {
+		t.Fatalf("unexpected write observation: %#v", run.Events)
+	}
+	encoded, err := json.Marshal(run.Events[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(content)) {
+		t.Fatalf("write event leaked file content: %s", encoded)
+	}
+	if run.WrittenFiles != 1 || run.WrittenBytes != len(content) {
+		t.Fatalf("unexpected write counters: files=%d bytes=%d", run.WrittenFiles, run.WrittenBytes)
+	}
+	if criticContent := agentWrittenFileContents(run.Events); !strings.Contains(criticContent, strings.TrimSpace(content)) {
+		t.Fatalf("transient critic evidence missing file content: %q", criticContent)
+	}
+
+	sess.AgentRun.WrittenFiles = agentMaxWriteFiles
+	second := filepath.Join(root, "second.txt")
+	if !executeAgentAction(context.Background(), sess, ToolResponse{Action: "write_file", Path: second, Content: &content}) {
+		t.Fatal("failed write should remain recoverable")
+	}
+	last := sess.agentSnapshot().Events[1]
+	if last.Success || !strings.Contains(last.Text, "limit exceeded") {
+		t.Fatalf("expected failed limit observation, got %#v", last)
+	}
+	if _, err := os.Stat(second); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("limited write created a destination: %v", err)
+	}
+	sess.AgentRun.WrittenFiles = 0
+	sess.AgentRun.WrittenBytes = agentMaxWriteBytes
+	third := filepath.Join(root, "third.txt")
+	if !executeAgentAction(context.Background(), sess, ToolResponse{Action: "write_file", Path: third, Content: &content}) {
+		t.Fatal("failed byte-limited write should remain recoverable")
+	}
+	last = sess.agentSnapshot().Events[2]
+	if last.Success || !strings.Contains(last.Text, "limit exceeded") {
+		t.Fatalf("expected failed byte-limit observation, got %#v", last)
+	}
+}
+
+func TestCommandObservationSupportsRequiredCommand(t *testing.T) {
+	cases := []struct {
+		name  string
+		event AgentEvent
+		want  bool
+	}{
+		{"successful foreground command", AgentEvent{Kind: "observation", Action: "run_command", Command: "ping -c 1 localhost", Success: true}, true},
+		{"completed check job", AgentEvent{Kind: "observation", Action: "check_job", Command: "ping -c 60 localhost", Success: true}, true},
+		{"completed get job", AgentEvent{Kind: "observation", Action: "get_job", Command: "ping -c 60 localhost", Success: true}, true},
+		{"failed foreground command", AgentEvent{Kind: "observation", Action: "run_command", Command: "ping bad", Success: false}, false},
+		{"failed background command", AgentEvent{Kind: "observation", Action: "check_job", Command: "ping bad", Success: false}, false},
+		{"cancelled background command", AgentEvent{Kind: "observation", Action: "get_job", Command: "ping localhost", Success: false}, false},
+		{"timed out background command", AgentEvent{Kind: "observation", Action: "check_job", Command: "ping localhost", Success: false}, false},
+		{"different completed command", AgentEvent{Kind: "observation", Action: "check_job", Command: "echo done", Success: true}, false},
+		{"background start only", AgentEvent{Kind: "observation", Action: "run_command_bg", Command: "ping localhost", Success: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.event.Sequence = 1
+			events := []AgentEvent{tc.event}
+			if got := hasCommandObservation(events, "ping"); got != tc.want {
+				t.Fatalf("hasCommandObservation() = %v, want %v", got, tc.want)
+			}
+			if got := evidenceSupportsCommand(events, []int{1}, "ping"); got != tc.want {
+				t.Fatalf("evidenceSupportsCommand() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -393,6 +576,168 @@ func TestIsTruncatedAgentJSON(t *testing.T) {
 	_, trailingErr := parseAgentAction(`{"action":"answer","text":"hi"} {"action":"answer","text":"again"}`)
 	if isTruncatedAgentJSON(trailingErr) {
 		t.Fatalf("expected a trailing-content error to NOT be classified as truncated, got: %v", trailingErr)
+	}
+}
+
+func TestAgentIterationBudgetPausesAndRenews(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sess := &agentSession{ID: "budget", AgentMode: true, AttachedFilePath: "/retained/attachment"}
+	sess.AgentRun = newAgentRun(sess.ID, "say hello", "", "")
+	sess.AgentRun.Iteration = 42
+	sess.AgentRun.SegmentIteration = sess.AgentRun.MaxIterations
+	runAgent(context.Background(), sess)
+	run := sess.agentSnapshot()
+	if run.Status != agentWaitingContinue || !run.CompletedAt.IsZero() || sess.AttachedFilePath == "" {
+		t.Fatalf("expected nonterminal pause retaining resources: %+v", run)
+	}
+	resumeAgent(sess, "")
+	run = sess.agentSnapshot()
+	if run.Status != agentRunning || run.Iteration != 42 || run.SegmentIteration != 0 || len(run.UserRequirements) != 0 {
+		t.Fatalf("unexpected continued run: %+v", run)
+	}
+	for _, waiting := range []AgentRunStatus{agentWaitingInput, agentWaitingApproval} {
+		sess.AgentRun.Status = waiting
+		sess.AgentRun.SegmentIteration = 5
+		resumeAgent(sess, "updated requirement")
+		run = sess.agentSnapshot()
+		if run.Iteration != 42 || run.SegmentIteration != 0 || run.Status != agentRunning {
+			t.Fatalf("feedback did not renew budget: %+v", run)
+		}
+	}
+}
+
+func TestConfiguredAgentIterationLimit(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int
+	}{{"", 30}, {"0", 30}, {"-2", 30}, {"invalid", 30}, {"7", 7}} {
+		t.Run(test.value, func(t *testing.T) {
+			t.Setenv("RECON_MAX_ITERATIONS", test.value)
+			if got := configuredAgentIterationLimit(); got != test.want {
+				t.Fatalf("limit = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAgentJobWaitDoesNotPollModel(t *testing.T) {
+	for _, action := range []string{"check_job", "get_job"} {
+		t.Run(action, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			sess := &agentSession{ID: "wait-" + action}
+			sess.AgentRun = newAgentRun(sess.ID, "collect result", "", "")
+			job := jobStore.create(sess.ID, sess.AgentRun.ID, "test job")
+			var calls atomic.Int32
+			waiting := make(chan struct{})
+			sess.eventSink = func(event AgentEvent) {
+				if event.Kind == "status" && event.Action == action {
+					close(waiting)
+				}
+			}
+			ollama := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				calls.Add(1)
+				content, _ := json.Marshal(ToolResponse{Action: action, JobID: job.ID})
+				_ = json.NewEncoder(response).Encode(ChatResponse{Message: ChatMessage{Content: string(content)}})
+			}))
+			defer ollama.Close()
+			previousURL := ollamaURL
+			ollamaURL = ollama.URL
+			t.Cleanup(func() { ollamaURL = previousURL })
+			sess.AgentRun.MaxIterations = 1
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			finished := make(chan struct{})
+			go func() {
+				runAgent(ctx, sess)
+				close(finished)
+			}()
+			select {
+			case <-waiting:
+			case <-ctx.Done():
+				<-finished
+				t.Fatal("worker did not wait for job")
+			}
+			select {
+			case <-finished:
+				t.Fatal("worker returned before job completion")
+			case <-time.After(20 * time.Millisecond):
+			}
+			jobStore.finish(job.ID, "completed", "result", "")
+			close(job.Done)
+			<-finished
+			run := sess.agentSnapshot()
+			if calls.Load() != 1 || run.Iteration != 1 || run.Status != agentWaitingContinue {
+				t.Fatalf("wait spent extra iterations or failed: calls=%d run=%+v", calls.Load(), run)
+			}
+			found := false
+			for _, event := range run.Events {
+				if event.Kind == "observation" && event.Action == action && event.Output == "result" && strings.Contains(event.Text, "completed") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("missing final job observation")
+			}
+		})
+	}
+}
+
+func TestAgentTerminalJobObservationRecordsCommandAndSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		status  string
+		success bool
+	}{
+		{"completed", true},
+		{"failed", false},
+		{"cancelled", false},
+		{"timeout", false},
+	} {
+		for _, action := range []string{"check_job", "get_job"} {
+			t.Run(tc.status+"/"+action, func(t *testing.T) {
+				sess := &agentSession{ID: "terminal-" + tc.status + "-" + action}
+				sess.AgentRun = newAgentRun(sess.ID, "collect result", "", "")
+				command := "ping -c 1 127.0.0.1"
+				job := jobStore.create(sess.ID, sess.AgentRun.ID, command)
+				jobStore.finish(job.ID, tc.status, "result", "")
+
+				if !executeAgentAction(context.Background(), sess, ToolResponse{Action: action, JobID: job.ID}) {
+					t.Fatal("terminal job observation stopped agent execution")
+				}
+				events := sess.agentSnapshot().Events
+				if len(events) != 1 {
+					t.Fatalf("expected one observation, got %#v", events)
+				}
+				event := events[0]
+				if event.Command != command || event.Success != tc.success || event.Action != action {
+					t.Fatalf("unexpected terminal job observation: %#v", event)
+				}
+			})
+		}
+	}
+}
+
+func TestAgentJobWaitCancellationAndDeadline(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		sess := &agentSession{ID: fmt.Sprintf("wait-cancel-%t", deadline)}
+		sess.AgentRun = newAgentRun(sess.ID, "collect result", "", "")
+		job := jobStore.create(sess.ID, sess.AgentRun.ID, "test job")
+		ctx, cancel := context.WithCancel(context.Background())
+		want := agentCancelled
+		if deadline {
+			cancel()
+			ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			want = agentLimitReached
+		} else {
+			cancel()
+		}
+		if executeAgentAction(ctx, sess, ToolResponse{Action: "check_job", JobID: job.ID}) {
+			t.Fatal("cancelled wait continued execution")
+		}
+		cancel()
+		if run := sess.agentSnapshot(); run.Status != want || run.CompletedAt.IsZero() {
+			t.Fatalf("status = %s, want %s", run.Status, want)
+		}
+		close(job.Done)
 	}
 }
 

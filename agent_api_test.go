@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,6 +70,139 @@ func TestAgentAPILifecycle(t *testing.T) {
 	}
 	if completed.Status != agentCompleted || completed.FinalAnswer != "plain text result" {
 		t.Fatalf("unexpected completed run: status=%q answer=%q", completed.Status, completed.FinalAnswer)
+	}
+}
+
+func TestAgentAPIWriteFileLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	path := filepath.Join(root, "main.go")
+	content := "package main\n\nfunc main() {}\n"
+	var agentCalls atomic.Int32
+	var criticSawContent atomic.Bool
+	ollama := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var chatRequest ChatRequest
+		if err := json.NewDecoder(request.Body).Decode(&chatRequest); err != nil {
+			t.Errorf("decode Ollama request: %v", err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(chatRequest.Messages) > 0 && strings.Contains(chatRequest.Messages[0].Content, "independent critic") {
+			if len(chatRequest.Messages) > 1 && strings.Contains(chatRequest.Messages[1].Content, strings.TrimSpace(content)) {
+				criticSawContent.Store(true)
+			}
+			_ = json.NewEncoder(response).Encode(ChatResponse{Message: ChatMessage{Content: `{"approved":true,"feedback":"","evidenceEventIds":[3]}`}})
+			return
+		}
+		var action ToolResponse
+		if agentCalls.Add(1) == 1 {
+			action = ToolResponse{Action: "write_file", Path: path, Content: &content}
+		} else {
+			action = ToolResponse{Action: "answer", Text: "Created main.go."}
+		}
+		encoded, _ := json.Marshal(action)
+		_ = json.NewEncoder(response).Encode(ChatResponse{Message: ChatMessage{Content: string(encoded)}})
+	}))
+	defer ollama.Close()
+
+	previousOllamaURL := ollamaURL
+	ollamaURL = ollama.URL
+	t.Cleanup(func() { ollamaURL = previousOllamaURL })
+	server := httptest.NewServer(newAgentAPI().handler())
+	defer server.Close()
+	requestBody, _ := json.Marshal(AgentRequest{Goal: "create a simple Go application in main.go", WritableRoots: []string{root}})
+	status, body := agentAPIRequest(t, http.MethodPost, server.URL+"/api/agent/runs", string(requestBody))
+	if status != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", status, body)
+	}
+	var created agentAPIRunResponse
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.WritableRoots) != 1 || created.WritableRoots[0] != root {
+		t.Fatalf("writable roots = %v, want [%s]", created.WritableRoots, root)
+	}
+	run := waitForAgentAPIStatus(t, server.URL, created.ID, agentWaitingApproval)
+	if run.FinalAnswer != "Created main.go." {
+		t.Fatalf("unexpected answer: %q", run.FinalAnswer)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != content {
+		t.Fatalf("written file = %q, %v", data, err)
+	}
+	if len(run.Events) < 3 || run.Events[2].Action != "write_file" || !run.Events[2].Success || run.Events[2].Path != path {
+		t.Fatalf("missing successful write evidence: %#v", run.Events)
+	}
+	encodedEvents, _ := json.Marshal(run.Events)
+	if bytes.Contains(encodedEvents, []byte(content)) {
+		t.Fatalf("API events leaked file content: %s", encodedEvents)
+	}
+	snapshotPath, err := reconAgentRunPath(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(snapshot, []byte(content)) {
+		t.Fatalf("persisted snapshot leaked file content: %s", snapshot)
+	}
+	if !criticSawContent.Load() {
+		t.Fatal("critic did not receive transient written-file content")
+	}
+}
+
+func TestAgentAPIContinueIterationBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	previousLimit, previousURL := agentIterationLimit, ollamaURL
+	agentIterationLimit = 1
+	t.Cleanup(func() { agentIterationLimit, ollamaURL = previousLimit, previousURL })
+	ollama := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_ = json.NewEncoder(response).Encode(ChatResponse{Message: ChatMessage{Content: `{"action":"update_findings","text":"working"}`}})
+	}))
+	defer ollama.Close()
+	ollamaURL = ollama.URL
+	api := newAgentAPI()
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	status, body := agentAPIRequest(t, http.MethodPost, server.URL+"/api/agent/runs", `{"goal":"prepare a result"}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("create = %d: %s", status, body)
+	}
+	var created agentAPIRunResponse
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	path := server.URL + "/api/agent/runs/" + created.ID
+	for total := 1; total <= 2; total++ {
+		run := waitForAgentAPIStatus(t, server.URL, created.ID, agentWaitingContinue)
+		if run.Iteration != total || run.SegmentIteration != 1 || run.MaxIterations != 1 || !run.CompletedAt.IsZero() {
+			t.Fatalf("unexpected paused counters: %+v", run)
+		}
+		api.evictExpiredRuns()
+		assertAPIRunPresent(t, api, created.ID)
+		for _, action := range []string{"approve", "feedback"} {
+			status, _ = agentAPIRequest(t, http.MethodPost, path+"/"+action, `{"feedback":"continue"}`)
+			if status != http.StatusConflict {
+				t.Fatalf("%s should not continue a paused run: %d", action, status)
+			}
+		}
+		if total == 1 {
+			status, body = agentAPIRequest(t, http.MethodPost, path+"/continue", "")
+			if status != http.StatusAccepted {
+				t.Fatalf("continue = %d: %s", status, body)
+			}
+		}
+	}
+	status, body = agentAPIRequest(t, http.MethodPost, path+"/cancel", "")
+	if status != http.StatusOK {
+		t.Fatalf("cancel = %d: %s", status, body)
+	}
+	status, _ = agentAPIRequest(t, http.MethodPost, path+"/continue", "")
+	if status != http.StatusConflict {
+		t.Fatalf("continued terminal run: %d", status)
 	}
 }
 

@@ -2,9 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -23,6 +30,49 @@ func TestReadStructuredAgentRequest(t *testing.T) {
 	}
 	if request.CompletionCriteria != "all hosts checked" || request.FilePath != "/tmp/input.txt" {
 		t.Fatalf("completion or attachment field was not preserved: %#v", request)
+	}
+}
+
+func TestTerminalIterationBudgetDecision(t *testing.T) {
+	for _, decision := range []string{"c\na\n", "invalid\ns\n", ""} {
+		t.Run(decision, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			previousLimit, previousURL := agentIterationLimit, ollamaURL
+			agentIterationLimit = 1
+			t.Cleanup(func() { agentIterationLimit, ollamaURL = previousLimit, previousURL })
+			var calls atomic.Int32
+			ollama := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				var chat ChatRequest
+				if err := json.NewDecoder(request.Body).Decode(&chat); err != nil {
+					t.Error(err)
+					return
+				}
+				content := `{"approved":true,"feedback":"","evidenceEventIds":[]}`
+				if !strings.Contains(chat.Messages[0].Content, "independent critic") {
+					content = `{"action":"answer","text":"Hello"}`
+					if calls.Add(1) == 1 {
+						content = `{"action":"update_findings","text":"Preparing a greeting"}`
+					}
+				}
+				_ = json.NewEncoder(response).Encode(ChatResponse{Message: ChatMessage{Content: content}})
+			}))
+			defer ollama.Close()
+			ollamaURL = ollama.URL
+			err := runTerminalAgent(bufio.NewReader(strings.NewReader(decision)), AgentRequest{Goal: "say hello"})
+			if decision == "" && !errors.Is(err, io.EOF) {
+				t.Fatalf("expected EOF to cancel paused run, got %v", err)
+			}
+			if decision != "" && err != nil {
+				t.Fatal(err)
+			}
+			want := int32(1)
+			if strings.HasPrefix(decision, "c") {
+				want = 2
+			}
+			if calls.Load() != want {
+				t.Fatalf("worker calls = %d, want %d", calls.Load(), want)
+			}
+		})
 	}
 }
 
@@ -53,6 +103,52 @@ func TestNewTerminalAgentSessionPersistsRun(t *testing.T) {
 	}
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("persisted run snapshot missing: %v", err)
+	}
+}
+
+func TestNewTerminalAgentSessionAuthorizesCanonicalWritableRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := newTerminalAgentSession(AgentRequest{Goal: "create files", WritableRoots: []string{root, root}})
+	if err != nil {
+		t.Fatalf("newTerminalAgentSession returned error: %v", err)
+	}
+	run := sess.agentSnapshot()
+	if len(run.WritableRoots) != 1 || run.WritableRoots[0] != canonicalRoot {
+		t.Fatalf("writable roots = %v, want [%s]", run.WritableRoots, canonicalRoot)
+	}
+	run.WritableRoots[0] = "mutated"
+	if sess.agentSnapshot().WritableRoots[0] != canonicalRoot {
+		t.Fatal("agent snapshot shares writable-root backing storage")
+	}
+	statePath, err := reconAgentRunPath(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(canonicalRoot)) {
+		t.Fatalf("persisted snapshot does not contain writable root: %s", data)
+	}
+}
+
+func TestNewTerminalAgentSessionRejectsInvalidWritableRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	file := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newTerminalAgentSession(AgentRequest{Goal: "create files", WritableRoots: []string{file}}); err == nil {
+		t.Fatal("expected regular-file writable root to be rejected")
+	}
+	if _, err := newTerminalAgentSession(AgentRequest{Goal: "create files", WritableRoots: []string{filepath.Join(t.TempDir(), "missing")}}); err == nil {
+		t.Fatal("expected missing writable root to be rejected")
 	}
 }
 

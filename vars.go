@@ -47,6 +47,16 @@ var ollamaNumCtx = parseIntEnv("OLLAMA_NUM_CTX", 0)
 
 var agentModelTimeout = parseDurationEnv("RECON_MODEL_TIMEOUT", 5*time.Minute)
 
+var agentIterationLimit = configuredAgentIterationLimit()
+
+func configuredAgentIterationLimit() int {
+	limit := parseIntEnv("RECON_MAX_ITERATIONS", agentMaxIterations)
+	if limit <= 0 {
+		return agentMaxIterations
+	}
+	return limit
+}
+
 func parseIntEnv(key string, defaultValue int) int {
 	value := utils.GetEnv(key, "")
 	if value == "" {

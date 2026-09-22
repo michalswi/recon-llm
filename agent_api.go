@@ -32,6 +32,7 @@ type agentAPIRunResponse struct {
 	GoalSpec            AgentGoalSpec   `json:"goalSpec"`
 	Status              AgentRunStatus  `json:"status"`
 	Iteration           int             `json:"iteration"`
+	SegmentIteration    int             `json:"segmentIteration"`
 	MaxIterations       int             `json:"maxIterations"`
 	StartedAt           time.Time       `json:"startedAt"`
 	UpdatedAt           time.Time       `json:"updatedAt"`
@@ -42,6 +43,7 @@ type agentAPIRunResponse struct {
 	Plan                []AgentPlanStep `json:"plan,omitempty"`
 	AvailableCommands   []string        `json:"availableCommands"`
 	UnavailableCommands []string        `json:"unavailableCommands,omitempty"`
+	WritableRoots       []string        `json:"writableRoots,omitempty"`
 }
 
 type agentAPIFeedbackRequest struct {
@@ -182,6 +184,8 @@ func (api *agentAPI) handleRun(response http.ResponseWriter, request *http.Reque
 		api.handleFeedback(response, request, entry)
 	case request.Method == http.MethodPost && action == "approve":
 		api.handleApprove(response, entry)
+	case request.Method == http.MethodPost && action == "continue":
+		api.handleContinue(response, entry)
 	case request.Method == http.MethodPost && action == "cancel":
 		api.handleCancel(response, entry)
 	default:
@@ -213,6 +217,19 @@ func (api *agentAPI) handleFeedback(response http.ResponseWriter, request *http.
 	writeAgentAPIJSON(response, http.StatusAccepted, newAgentAPIRunResponse(entry.session.agentSnapshot()))
 }
 
+func (api *agentAPI) handleContinue(response http.ResponseWriter, entry *apiAgentRun) {
+	entry.mu.Lock()
+	if entry.session.agentSnapshot().Status != agentWaitingContinue {
+		entry.mu.Unlock()
+		writeAgentAPIError(response, http.StatusConflict, "agent is not waiting for continuation")
+		return
+	}
+	resumeAgent(entry.session, "")
+	entry.mu.Unlock()
+	entry.start()
+	writeAgentAPIJSON(response, http.StatusAccepted, newAgentAPIRunResponse(entry.session.agentSnapshot()))
+}
+
 func (api *agentAPI) handleApprove(response http.ResponseWriter, entry *apiAgentRun) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
@@ -233,7 +250,7 @@ func (api *agentAPI) handleCancel(response http.ResponseWriter, entry *apiAgentR
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	run := entry.session.agentSnapshot()
-	if run.Status != agentRunning && run.Status != agentWaitingInput && run.Status != agentWaitingApproval {
+	if run.Status != agentRunning && run.Status != agentWaitingInput && run.Status != agentWaitingApproval && run.Status != agentWaitingContinue {
 		writeAgentAPIError(response, http.StatusConflict, "agent run is already finished")
 		return
 	}
@@ -292,6 +309,7 @@ func newAgentAPIRunResponse(run *AgentRun) agentAPIRunResponse {
 		GoalSpec:            run.GoalSpec,
 		Status:              run.Status,
 		Iteration:           run.Iteration,
+		SegmentIteration:    run.SegmentIteration,
 		MaxIterations:       run.MaxIterations,
 		StartedAt:           run.StartedAt,
 		UpdatedAt:           run.UpdatedAt,
@@ -302,6 +320,7 @@ func newAgentAPIRunResponse(run *AgentRun) agentAPIRunResponse {
 		Plan:                run.Plan,
 		AvailableCommands:   run.AvailableCommands,
 		UnavailableCommands: run.UnavailableCommands,
+		WritableRoots:       append([]string(nil), run.WritableRoots...),
 	}
 }
 
