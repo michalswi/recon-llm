@@ -1,5 +1,7 @@
 # Long-Running Task Behavior
 
+> **Status: TODO — long-running task improvements remain.** The behavior below describes the current implementation, not a proposed or completed solution to every long-running-task limitation.
+
 How recon behaves when given a long-running task, based on the current worker, runtime, terminal, and API implementations.
 
 - **Iteration budget**: 30 iterations per execution segment by default, configurable with a positive `RECON_MAX_ITERATIONS` value. Unset, invalid, zero, or negative values use the default. Each run captures its limit as `maxIterations`. `iteration` remains the lifetime count for auditing; `segmentIteration` tracks the current segment and resets after clarification, revision, or explicit continuation. Automatic retries and critic revisions do not renew the segment budget.
@@ -13,3 +15,8 @@ How recon behaves when given a long-running task, based on the current worker, r
 - **`limit_reached` is terminal**: deadline expiry still ends the run and cleans up its jobs. Neither `/feedback` nor `/continue` can resume this state; a new run must be started. Persisted snapshots are audit records, not automatic restart/resume checkpoints.
 
 Summary: each segment has a configurable iteration budget and a 30-minute deadline. Exhausting iterations pauses for explicit continuation; deadline expiry remains terminal. Background-job checks wait without repeated model polling, preserving iterations while keeping cancellation and deadlines active.
+
+## TODO
+
+- Decide whether foreground commands need process-group cleanup so a timed-out or cancelled shell cannot leave child processes running.
+- Design restart recovery if long-running tasks must survive process exit; persisted snapshots currently provide an audit record only and cannot resume a run.
