@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- Go 1.25.5 or a prebuilt `recon` binary
+- Go 1.26.10 or a prebuilt `recon` binary
 - A running [Ollama](https://ollama.com/) server
 - A local model; larger models generally follow the agent protocol more reliably
 
