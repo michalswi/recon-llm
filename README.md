@@ -1,10 +1,10 @@
 # recon
 
-`recon` is an autonomous agent for an Ollama-compatible chat endpoint, with a terminal interface and an opt-in HTTP API but no browser UI. Each objective runs through a strict JSON action loop with planning, allowlisted command execution, background jobs, evidence tracking, context compaction, and independent answer verification.
+`recon` is a terminal-only autonomous agent for an Ollama-compatible chat endpoint. Each objective runs through a strict JSON action loop with planning, allowlisted command execution, background jobs, evidence tracking, context compaction, and independent answer verification.
 
 ## Requirements
 
-- Go 1.26.10 or a prebuilt `recon` binary
+- Go 1.25.5 or a prebuilt `recon` binary
 - A running [Ollama](https://ollama.com/) server
 - A local model; larger models generally follow the agent protocol more reliably
 
@@ -132,7 +132,15 @@ Run snapshots are written to `~/.recon/agent_runs/<run-id>.json`. Attachments ar
 
 ## Docker
 
-Docker support is temporary and not currently developed or maintained. The [Dockerfile](Dockerfile) and Docker build target in the [Makefile](Makefile) are commented out; build and run the Go application directly for now. Any previously published image may not reflect the current application.
+The image runs the terminal application as an unprivileged user. Use an interactive terminal and configure an Ollama URL reachable from the container.
+
+```sh
+docker run --rm -it \
+  -e OLLAMA_URL="http://<ollama-host>:11434/api/chat" \
+  michalsw/recon:latest
+```
+
+Not every command listed in [comm.go](comm.go) is installed in the image.
 
 ## Security
 

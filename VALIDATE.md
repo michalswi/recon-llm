@@ -1,18 +1,8 @@
 # Explicit Validation and Execution of Generated Code
 
-> **Status: TODO — not implemented.** This is a design proposal. Sections below that describe actions, schemas, or checks (`build_project`, `test_project`, `run_project`, per-run operation authorization, the listed tests) are planned work, not current behavior.
-
-## Current Behavior
-
-- `write_file` (see `APP.md` and `README.md`) creates requested files beneath authorized `writableRoots`; a successful write completes a write-only code goal.
-- `prompts/agent.txt` instructs the agent never to build, test, run, start, or probe generated code unless the user explicitly requests it.
-- `agentEvidenceEventIsValid` in `agent_worker.go` already treats a `run_command_bg` start as proving only that a job started, and a `check_job`/`get_job` snapshot as proof only once the job is no longer running.
-- There is no build/test/run capability: `go` and other language toolchains are not in the `comm.go` allowlist, there are no structured validation actions, and the authorized operation is not recorded on `AgentRun`.
-- Command execution is not sandboxed and inherits the recon process's permissions.
-
 ## Scope
 
-This document covers building, testing, running, starting, and probing generated code after files have been written. File creation itself is already implemented through `write_file`.
+This document covers building, testing, running, starting, and probing generated code after files have been written. File creation itself is specified separately in `GO.md`.
 
 Writing requested files does not authorize any command that compiles or executes them. The default completion point for a code-generation goal is successful creation of the requested files.
 
@@ -80,7 +70,7 @@ Sandboxing generated code would require a separate isolation design, such as a c
 
 ## Prompt Rules
 
-The first two rules below are already in `prompts/agent.txt`; the rest are TODO. The agent protocol should state:
+The agent protocol should state:
 
 - Successful `write_file` observations complete ordinary file-generation goals.
 - Never build, test, run, start, or probe generated code unless explicitly requested.
@@ -92,7 +82,7 @@ Any heuristic that classifies user intent should be instrumented before it chang
 
 ## Evidence and Verification
 
-Background-job evidence is already handled as described under Current Behavior. Once validation actions exist, their observations must be recognized by `agentEvidenceEventIsValid` according to their semantics:
+Validation observations must be recognized by `agentEvidenceEventIsValid` according to their semantics:
 
 - a successful build proves compilation only;
 - a successful test proves that the observed test command exited successfully;
@@ -104,7 +94,7 @@ The critic should reject claims such as "tests pass" or "the server works" unles
 
 ## Tests
 
-None of these exist yet. Add focused tests for:
+Add focused tests for:
 
 - writing files without emitting any build, test, run, start, or probe action;
 - explicit build authorization permitting compilation only;
@@ -119,7 +109,5 @@ None of these exist yet. Add focused tests for:
 - separate API integration where an explicitly authorized request writes, builds, starts, and probes a simple local application.
 
 ## Expected Result
-
-Target behavior once implemented (today only the write-and-stop part applies):
 
 A file-generation request writes the requested files and stops. Validation or execution occurs only when the user explicitly requests the corresponding operation, and every resulting claim is supported by direct evidence. The system never treats file creation as implicit permission to execute generated code.
