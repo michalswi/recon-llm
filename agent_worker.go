@@ -59,6 +59,7 @@ type AgentEvent struct {
 	Action           string    `json:"action,omitempty"`
 	Text             string    `json:"text,omitempty"`
 	Command          string    `json:"command,omitempty"`
+	Skill            string    `json:"skill,omitempty"`
 	Path             string    `json:"path,omitempty"`
 	BytesWritten     int       `json:"bytesWritten,omitempty"`
 	Output           string    `json:"output,omitempty"`
@@ -101,6 +102,8 @@ type AgentRun struct {
 	CandidateHistory    []string        `json:"candidateHistory,omitempty"`
 	UserRequirements    []string        `json:"userRequirements,omitempty"`
 	AttachmentNote      string          `json:"attachmentNote,omitempty"`
+	AvailableSkills     []SkillMetadata `json:"availableSkills,omitempty"`
+	ActiveSkills        []AgentSkill    `json:"activeSkills,omitempty"`
 }
 
 type AgentPlanStep struct {
@@ -217,6 +220,8 @@ func (s *agentSession) agentSnapshot() *AgentRun {
 	snapshot.CandidateHistory = append([]string(nil), s.AgentRun.CandidateHistory...)
 	snapshot.UserRequirements = append([]string(nil), s.AgentRun.UserRequirements...)
 	snapshot.WritableRoots = append([]string(nil), s.AgentRun.WritableRoots...)
+	snapshot.AvailableSkills = append([]SkillMetadata(nil), s.AgentRun.AvailableSkills...)
+	snapshot.ActiveSkills = append([]AgentSkill(nil), s.AgentRun.ActiveSkills...)
 	snapshot.Plan = clonePlanSteps(s.AgentRun.Plan)
 	return &snapshot
 }
@@ -384,7 +389,7 @@ func runAgent(ctx context.Context, sess *agentSession) {
 			action.EvidenceEventIDs = append([]int(nil), verification.EvidenceEventIDs...)
 		}
 		resetAgentFailures(sess)
-		sess.appendAgentEvent(AgentEvent{Kind: "action", Action: action.Action, Text: action.Text, Command: action.Command, Path: action.Path, EvidenceEventIDs: action.EvidenceEventIDs, Thinking: response.Thinking})
+		sess.appendAgentEvent(AgentEvent{Kind: "action", Action: action.Action, Text: action.Text, Command: action.Command, Skill: action.Skill, Path: action.Path, EvidenceEventIDs: action.EvidenceEventIDs, Thinking: response.Thinking})
 		if err := sess.persist(); err != nil {
 			finishAgent(sess, agentFailed, "", "could not persist action before execution: "+err.Error())
 			return
@@ -413,6 +418,11 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 		return nil, err
 	}
 	prompt += fmt.Sprintf("\n\nEXECUTION ENVIRONMENT:\nOS: %s\nWorking directory: %s\nWritable roots: %s\nCommands installed and allowed: %s\nAllowed but unavailable: %s\nCommands run with the same filesystem and network permissions as the recon process.", run.OperatingSystem, run.WorkingDirectory, emptyAgentValue(strings.Join(run.WritableRoots, ", ")), strings.Join(run.AvailableCommands, ", "), emptyAgentValue(strings.Join(run.UnavailableCommands, ", ")))
+	if len(run.AvailableSkills) > 0 {
+		catalog, _ := json.Marshal(run.AvailableSkills)
+		prompt += "\n\nAVAILABLE SKILLS (names and descriptions only):\n" + string(catalog) + "\nUse load_skill with an exact catalog name when its procedure is relevant. Do not reload an active skill."
+	}
+	prompt += agentSkillInstructions(run)
 	if revisionContext := agentRevisionContext(run); revisionContext != "" {
 		prompt += "\n\nREVISION CONTEXT:\n" + revisionContext + "\nReturn a self-contained candidate containing the complete updated deliverable. Never claim that a previous response contains a requested change; include the changed result in this answer."
 	}
@@ -439,7 +449,7 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 			if event.Kind == "invalid_action" {
 				messages = append(messages, ChatMessage{Role: "assistant", Content: event.Text})
 			} else {
-				content, _ := json.Marshal(ToolResponse{Action: event.Action, Command: event.Command, Path: event.Path, Text: event.Text, StepID: event.StepID, EvidenceEventIDs: event.EvidenceEventIDs})
+				content, _ := json.Marshal(ToolResponse{Action: event.Action, Command: event.Command, Skill: event.Skill, Path: event.Path, Text: event.Text, StepID: event.StepID, EvidenceEventIDs: event.EvidenceEventIDs})
 				messages = append(messages, ChatMessage{Role: "assistant", Content: string(content)})
 			}
 		case "observation", "error":
@@ -794,6 +804,7 @@ func verifyAgentAnswer(ctx context.Context, sess *agentSession, candidate string
 	planJSON, _ := json.Marshal(run.Plan)
 	revisionContext := agentRevisionContext(run)
 	userContent := agentGoalDescription(run) + "\n\nREVISION CONTEXT:\n" + revisionContext + "\n\nPLAN:\n" + string(planJSON)
+	userContent += agentSkillInstructions(run)
 	if run.ContextSummary != "" {
 		userContent += "\n\nEARLIER RUN SUMMARY:\n" + run.ContextSummary
 	}
@@ -1003,6 +1014,10 @@ func parseAgentAction(raw string) (ToolResponse, error) {
 		if strings.TrimSpace(action.JobID) == "" {
 			return ToolResponse{}, fmt.Errorf("action %q requires jobId", action.Action)
 		}
+	case "load_skill":
+		if len(action.Skill) > 64 || !agentSkillNamePattern.MatchString(action.Skill) {
+			return ToolResponse{}, errors.New("action load_skill requires a valid skill name from the catalog")
+		}
 	case "list_jobs":
 	case "list_directory":
 		if strings.TrimSpace(action.Path) == "" {
@@ -1060,6 +1075,7 @@ var agentActionAllowedFields = map[string]map[string]bool{
 	"get_job":               {"jobId": true},
 	"cancel_job":            {"jobId": true},
 	"list_jobs":             {},
+	"load_skill":            {"skill": true},
 	"list_directory":        {"path": true, "maxDepth": true},
 	"search_files":          {"path": true, "pattern": true},
 	"write_file":            {"path": true, "content": true, "overwrite": true},
@@ -1099,6 +1115,9 @@ func validateAgentActionFieldScope(action ToolResponse) error {
 	}
 	if action.JobID != "" && !allowed["jobId"] {
 		stray = append(stray, "jobId")
+	}
+	if action.Skill != "" && !allowed["skill"] {
+		stray = append(stray, "skill")
 	}
 	if len(action.Steps) > 0 && !allowed["steps"] {
 		stray = append(stray, "steps")
@@ -1293,6 +1312,13 @@ func validateShAndXargsWords(words []string) error {
 
 func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResponse) bool {
 	switch action.Action {
+	case "load_skill":
+		if err := sess.activateAgentSkill(action.Skill); err != nil {
+			sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Skill: action.Skill, Text: err.Error()})
+		} else {
+			sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Skill: action.Skill, Text: "Skill loaded: " + action.Skill + ". Its instructions remain in the active skill context.", Success: true})
+		}
+		return true
 	case "answer":
 		sess.appendAgentEvent(AgentEvent{Kind: "answer", Action: action.Action, Text: action.Text, EvidenceEventIDs: action.EvidenceEventIDs})
 		sess.appendAgentMessage(ChatMessage{Role: "assistant", Content: action.Text})

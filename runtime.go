@@ -128,6 +128,7 @@ type ToolResponse struct {
 	MaxDepth         int      `json:"maxDepth,omitempty"`
 	Text             string   `json:"text,omitempty"`
 	JobID            string   `json:"jobId,omitempty"`
+	Skill            string   `json:"skill,omitempty"`
 	Steps            []string `json:"steps,omitempty"`
 	StepID           int      `json:"stepId,omitempty"`
 	EvidenceEventIDs []int    `json:"evidenceEventIds,omitempty"`
@@ -192,6 +193,7 @@ type agentSession struct {
 	AgentRun           *AgentRun `json:"agentRun,omitempty"`
 	agentCancel        context.CancelFunc
 	eventSink          func(AgentEvent)
+	skillCatalog       []AgentSkill
 
 	// Persistence measurement only (never serialized — persistedAgentState does
 	// not reference these): see AGENT.md #9, "measure first" before optimizing
@@ -260,6 +262,8 @@ func cloneAgentRun(run *AgentRun) *AgentRun {
 	clone.CandidateHistory = append([]string(nil), run.CandidateHistory...)
 	clone.UserRequirements = append([]string(nil), run.UserRequirements...)
 	clone.WritableRoots = append([]string(nil), run.WritableRoots...)
+	clone.AvailableSkills = append([]SkillMetadata(nil), run.AvailableSkills...)
+	clone.ActiveSkills = append([]AgentSkill(nil), run.ActiveSkills...)
 	clone.Plan = clonePlanSteps(run.Plan)
 	return &clone
 }

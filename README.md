@@ -60,10 +60,14 @@ Plain HTTP to a non-loopback host triggers a startup warning: prompts and respon
 
 Enter an objective to start a run. An existing absolute `.jpg`, `.jpeg`, `.png`, or `.webp` path in the objective is automatically attached for analysis by a vision-capable model.
 
-- `/agent [GOAL]` collects expected output, constraints, completion criteria, a one-run attachment path, and an optional writable root for file creation.
+- `/agent [GOAL]` opens a guided task form (examples below).
 - `/attach PATH` attaches a file or a directory's regular files to subsequent runs in the current terminal process.
 - `/attached` lists attachments.
 - `/detach PATH` removes one attachment; `/detach` clears all. `/deattach` is an alias.
+
+Type `Explain DNS` to start immediately, or `/agent Explain DNS` to add details first. `/agent` on its own also asks for the goal. `[GOAL]` means optional text; do not type the brackets.
+
+The form asks for expected output, constraints, completion criteria, an attachment, a folder where recon may write files, and comma-separated skill names. Press Enter to skip any optional field. Both ways start the same agent.
 
 Up to 30 files can be attached. Images and document extraction are capped at 20 MiB per file. Extracted text shares a 64 KiB budget per run; directory files initially include at most 1 KiB each, with paths retained for further inspection.
 
@@ -74,6 +78,64 @@ At the iteration limit, choose continue [c] or stop [s]. Continuing, clarifying,
 Background `check_job`/`get_job` actions wait without extra model calls or iterations; cancellation and the segment deadline still apply. Jobs continue during user-decision pauses, have a separate 1-hour timeout, and are cleaned up when the run ends.
 
 Use `/h` for all controls. During a session, `/ollama` checks reachability, `/ollama-ps` lists loaded models, and `/ollama-ls` lists available models. Prompt and thinking-mode changes apply to subsequent runs.
+
+## External Skills
+
+Think of a skill as a **saved checklist for the agent**. Instead of typing the same instructions every time, save them in a file and reuse them.
+
+For example, you often ask recon to explain application logs. A skill can tell it what to look for and how to organize the answer.
+
+### Example: explain application errors
+
+Create the folder `~/.recon/skills/log-review/`, then save this text as `SKILL.md` inside it:
+
+```markdown
+---
+name: log-review
+description: Use when the user asks to investigate application logs or explain errors.
+---
+# Review an application log
+
+1. Read the log supplied by the user. If none was supplied, ask for it.
+2. Find errors and repeated warnings. Include timestamps when available.
+3. Explain the likely cause in plain language. Distinguish what the log
+   proves from what is only a guess.
+4. Suggest the next checks, but do not run them or change files unless asked.
+
+Organize the answer into:
+- Summary: what appears to be going wrong.
+- Evidence: short relevant log excerpts, with secrets removed.
+- Next steps: checks the user can take to confirm or fix the problem.
+```
+
+The header between `---` lines tells recon the skill's **name** and **when to use it**. Everything below it tells the agent **what to do**. The name must match the folder name.
+
+### Use it in recon
+
+1. Type `/skills` to check that `log-review` is listed.
+2. Type `/agent Explain the errors in my application log`.
+3. At **Attachment path**, enter the path to your actual log file.
+4. At **Skills**, enter `log-review`. Press Enter to skip the other optional fields.
+
+Recon will read your log and use the checklist to produce a summary, evidence, and next steps. The skill is not a script: the agent follows its instructions using recon's existing tools.
+
+You can also leave the Skills field empty and let the agent choose based on skill descriptions. API users can select it with `"skills":["log-review"]`.
+
+No rebuild is needed. Edit the file to change the checklist; changes apply to new runs, not a run already in progress.
+
+### Prompts vs. Skills
+
+| Prompts | Skills |
+|---|---|
+| Set a role: "You are a cloud engineer" | Give a checklist: "Review logs using these steps" |
+| Built-in defaults, with external/custom overrides | External files; no rebuild needed |
+| One base prompt per run | Multiple skills per run |
+
+**File rules:** the header accepts only `name` and `description`. Names use lowercase letters, digits, and single separating hyphens (up to 64 characters). Descriptions can be up to 512 bytes; instructions must not be empty.
+
+**Limits:** 64 installed skills, 16 KiB per file, and 8 active skills totaling at most 64 KiB of instructions. Invalid skill files prevent a run from starting.
+
+**Trust:** use only reviewed skills, without secrets: active instructions go to Ollama and local run snapshots. Skills do not grant extra permissions or override the agent protocol. This version does not automatically run scripts, load supporting files, or download skills. See [APP.md](APP.md#external-skills) for lifecycle details.
 
 ## Agent API
 

@@ -30,6 +30,7 @@ type AgentRequest struct {
 	FilePath           string   `json:"filePath,omitempty"`
 	FilePaths          []string `json:"filePaths,omitempty"`
 	WritableRoots      []string `json:"writableRoots,omitempty"`
+	Skills             []string `json:"skills,omitempty"`
 }
 
 const (
@@ -238,6 +239,20 @@ func handleAgentCLICommand(input string) bool {
 		fmt.Printf("%s %d file(s) remain attached.\n", info("Detached:"), len(terminalAttachmentPaths))
 	case "/sysprompt":
 		printSystemPrompt()
+	case "/skills":
+		skills, err := discoverAgentSkills()
+		if err != nil {
+			fmt.Println(warn("Skill discovery failed:"), err)
+			break
+		}
+		if len(skills) == 0 {
+			fmt.Println(info("No skills found. Add ~/.recon/skills/<name>/SKILL.md to install a trusted local skill."))
+			break
+		}
+		fmt.Println(accent("Available skills (select through /agent, or let the worker load a relevant skill):"))
+		for _, skill := range skills {
+			fmt.Printf("  %s: %s\n", skill.Name, skill.Description)
+		}
 	case "/editsysprompt":
 		handleEditSystemPrompt()
 	case "/think-on":
@@ -284,7 +299,22 @@ func readStructuredAgentRequest(reader *bufio.Reader, initialGoal string) (Agent
 	if strings.TrimSpace(writableRoot) != "" {
 		request.WritableRoots = []string{writableRoot}
 	}
-	return request, err
+	if err != nil {
+		return AgentRequest{}, err
+	}
+	skills, err := promptLine(reader, "Skills (optional, comma-separated names; /skills lists them): ")
+	if errors.Is(err, io.EOF) {
+		return request, nil
+	}
+	if err != nil {
+		return AgentRequest{}, err
+	}
+	if skills != "" {
+		for _, name := range strings.Split(skills, ",") {
+			request.Skills = append(request.Skills, strings.TrimSpace(name))
+		}
+	}
+	return request, nil
 }
 
 func runTerminalAgent(reader *bufio.Reader, request AgentRequest) error {
@@ -413,6 +443,10 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	skills, err := discoverAgentSkills()
+	if err != nil {
+		return nil, err
+	}
 
 	sessionID := fmt.Sprintf("run_%d", time.Now().UnixNano())
 	sess := &agentSession{
@@ -424,6 +458,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		OriginalPromptName: systemPromptName,
 		AgentStart:         0,
 		ThinkingEnabled:    thinkingEnabled,
+		skillCatalog:       skills,
 	}
 	sess.eventSink = printAgentEvent
 
@@ -498,6 +533,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	}
 	run := newAgentRun(sessionID, goalDescription, systemPrompt, systemPromptName)
 	run.WritableRoots = writableRoots
+	run.AvailableSkills = agentSkillMetadata(skills)
 	run.AttachmentNote = strings.TrimSpace(attachmentNote.String())
 	run.GoalSpec = normalizeAgentGoalSpec(AgentGoalSpec{
 		Objective:          request.Goal,
@@ -506,6 +542,11 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		CompletionCriteria: request.CompletionCriteria,
 	})
 	sess.AgentRun = run
+	for _, name := range request.Skills {
+		if err := sess.activateAgentSkill(name); err != nil {
+			return nil, err
+		}
+	}
 	if err := sess.persist(); err != nil {
 		return nil, err
 	}

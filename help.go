@@ -16,8 +16,8 @@ import (
 func printHelp() {
 	fmt.Println(accent("Agent commands:"))
 	commands := [][2]string{
-		{"<objective>", "Start an agent run with a quick objective"},
-		{"/agent [GOAL]", "Collect expected output, constraints, completion criteria, and attachment"},
+		{"<objective>", "Type a task to start immediately, without a form"},
+		{"/agent [GOAL]", "Start a guided task form; GOAL is optional (see examples below)"},
 		{"/h, /help", "Show this help"},
 		{"/q", "Exit; Ctrl+C cancels an active run"},
 		{"/dir", "Show current working directory"},
@@ -31,6 +31,7 @@ func printHelp() {
 		{"/deattach [PATH]", "Clear all persistent attachments, or just PATH (/detach also works)"},
 		{"/sysprompt", "Show the agent base prompt"},
 		{"/editsysprompt", "Select or enter an agent base prompt"},
+		{"/skills", "List external skills from ~/.recon/skills"},
 		{"/think-on", "Enable model reasoning"},
 		{"/think-off", "Disable model reasoning"},
 	}
@@ -39,6 +40,15 @@ func printHelp() {
 		fmt.Fprintf(writer, "  %s\t%s\n", command[0], command[1])
 	}
 	writer.Flush()
+	fmt.Println(accent("\nStarting a task:"))
+	fmt.Println("  Explain DNS         Start immediately with this goal.")
+	fmt.Println("  /agent              Ask for the goal, then optional details.")
+	fmt.Println("  /agent Explain DNS  Use this goal, then ask for optional details.")
+	fmt.Println("  [GOAL] means optional text; do not type the brackets.")
+	fmt.Println("  The form asks for expected output, constraints, completion criteria,")
+	fmt.Println("  an attachment, a folder where recon may write files, and skills.")
+	fmt.Println("  Press Enter to skip any optional field. Both ways use the same agent.")
+	fmt.Println()
 	fmt.Println(accent("Agent tool allowlist:"))
 	fmt.Printf("  [%s]\n", strings.Join(allowedCommandsList(), ", "))
 }
