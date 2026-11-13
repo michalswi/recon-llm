@@ -83,43 +83,52 @@ Use `/h` for all controls. During a session, `/ollama` checks reachability, `/ol
 
 Think of a skill as a **saved checklist for the agent**. Instead of typing the same instructions every time, save them in a file and reuse them.
 
-For example, you often ask recon to explain application logs. A skill can tell it what to look for and how to organize the answer.
+For example, your goal is: "analyze output from pinging google.com five times and make report". A skill can tell recon which measurements to include and how to explain them.
 
-### Example: explain application errors
+### Example: ping a host and report the results
 
-Create the folder `~/.recon/skills/log-review/`, then save this text as `SKILL.md` inside it:
+Create the folder `~/.recon/skills/ping-report/`, then save this text as `SKILL.md` inside it:
 
 ```markdown
 ---
-name: log-review
-description: Use when the user asks to investigate application logs or explain errors.
+name: ping-report
+description: Use when the user asks to run ping and report on connectivity.
 ---
-# Review an application log
+# Prepare a ping report
 
-1. Read the log supplied by the user. If none was supplied, ask for it.
-2. Find errors and repeated warnings. Include timestamps when available.
-3. Explain the likely cause in plain language. Distinguish what the log
-   proves from what is only a guess.
-4. Suggest the next checks, but do not run them or change files unless asked.
-
-Organize the answer into:
-- Summary: what appears to be going wrong.
-- Evidence: short relevant log excerpts, with secrets removed.
-- Next steps: checks the user can take to confirm or fix the problem.
+1. Run ping with the host and packet count requested by the user.
+   On macOS/Linux, five pings to google.com use: ping -c 5 google.com
+2. Read the actual command output. Never invent results.
+3. Report packets sent, packets received, and packet loss percentage.
+4. Include minimum, average, and maximum round-trip time when available.
+5. Explain what these results show in plain language. Five pings are
+   only a brief sample, not proof of overall connection reliability.
+6. If ping fails, report the error. Missing replies alone do not prove
+   the host is offline; ICMP traffic may be blocked.
+7. Do not run additional network checks unless the user asks.
 ```
 
 The header between `---` lines tells recon the skill's **name** and **when to use it**. Everything below it tells the agent **what to do**. The name must match the folder name.
 
 ### Use it in recon
 
-1. Type `/skills` to check that `log-review` is listed.
-2. Type `/agent Explain the errors in my application log`.
-3. At **Attachment path**, enter the path to your actual log file.
-4. At **Skills**, enter `log-review`. Press Enter to skip the other optional fields.
+**You do not need `/agent` to use skills.** Type `/skills` to check that `ping-report` is installed, then enter your goal normally:
 
-Recon will read your log and use the checklist to produce a summary, evidence, and next steps. The skill is not a script: the agent follows its instructions using recon's existing tools.
+```text
+analyze output from pinging google.com five times and make report
+```
 
-You can also leave the Skills field empty and let the agent choose based on skill descriptions. API users can select it with `"skills":["log-review"]`.
+The agent can choose and load `ping-report` based on its description. Automatic selection is the agent's decision; it is not guaranteed for every goal.
+
+**To explicitly select the skill**, use the optional `/agent` form:
+
+1. Type `/agent analyze output from pinging google.com five times and make report`.
+2. Press Enter to skip the optional fields until **Skills**. No attachment or writable folder is needed.
+3. At **Skills**, enter `ping-report`.
+
+Recon will use the checklist to run five pings and prepare a report from the actual output. The skill is not a script: the agent follows its instructions using recon's existing tools. The report appears in the terminal for you to accept or revise.
+
+Leaving the form's Skills field empty also allows automatic selection. API users can explicitly select it with `"skills":["ping-report"]`.
 
 No rebuild is needed. Edit the file to change the checklist; changes apply to new runs, not a run already in progress.
 
@@ -127,7 +136,7 @@ No rebuild is needed. Edit the file to change the checklist; changes apply to ne
 
 | Prompts | Skills |
 |---|---|
-| Set a role: "You are a cloud engineer" | Give a checklist: "Review logs using these steps" |
+| Set a role: "You are a network engineer" | Give a checklist: "Run ping and report these measurements" |
 | Built-in defaults, with external/custom overrides | External files; no rebuild needed |
 | One base prompt per run | Multiple skills per run |
 
