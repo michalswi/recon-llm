@@ -6,6 +6,7 @@ require (
 	github.com/google/gopacket v1.1.19
 	github.com/michalswi/color v0.0.0-20250901125859-f157beb0ceec
 	github.com/michalswi/pdf-reader v1.2.3
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

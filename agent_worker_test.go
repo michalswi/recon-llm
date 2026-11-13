@@ -1017,6 +1017,7 @@ func TestParseAgentActionAcceptsEachActionsOwnFields(t *testing.T) {
 		`{"action":"get_job","jobId":"job_1"}`,
 		`{"action":"cancel_job","jobId":"job_1"}`,
 		`{"action":"list_jobs"}`,
+		`{"action":"load_skill","skill":"report"}`,
 		`{"action":"list_directory","path":"/tmp","maxDepth":2}`,
 		`{"action":"search_files","path":"/tmp","pattern":"foo"}`,
 		`{"action":"create_plan","steps":["step one"]}`,
@@ -1041,6 +1042,8 @@ func TestParseAgentActionRejectsCrossActionFields(t *testing.T) {
 		`{"action":"complete_step","stepId":1,"command":"ls"}`,
 		`{"action":"search_files","path":"/tmp","pattern":"foo","text":"extra"}`,
 		`{"action":"list_directory","path":"/tmp","pattern":"foo"}`,
+		`{"action":"answer","text":"done","skill":"report"}`,
+		`{"action":"load_skill","skill":"report","command":"ls"}`,
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
@@ -1048,6 +1051,18 @@ func TestParseAgentActionRejectsCrossActionFields(t *testing.T) {
 				t.Fatalf("expected %s to be rejected for carrying a cross-action field", raw)
 			}
 		})
+	}
+}
+
+func TestParseAgentActionRequiresSkillName(t *testing.T) {
+	for _, raw := range []string{
+		`{"action":"load_skill"}`,
+		`{"action":"load_skill","skill":"../report"}`,
+		`{"action":"load_skill","skill":"Report"}`,
+	} {
+		if _, err := parseAgentAction(raw); err == nil {
+			t.Fatalf("expected invalid skill name to be rejected: %s", raw)
+		}
 	}
 }
 

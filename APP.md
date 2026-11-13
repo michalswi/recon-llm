@@ -14,6 +14,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `agent_terminal.go`: terminal entry point, structured goal input, attachment paths, live event rendering, clarification, approval, revision, and cancellation.
 - `agent_api.go`: opt-in HTTP entry point for creating, inspecting, resuming, approving, and cancelling agent runs.
 - `agent_worker.go`: run/event model, limits, strict action parser, planning, context compaction, tool execution, critic verification, and cleanup.
+- `skills.go`: external skill discovery, YAML metadata validation, frozen per-run catalogs, activation limits, and shared worker/critic instruction context.
 - `comm.go`: command-name allowlist.
 - `help.go`: terminal help and system-prompt selection.
 - `fileextract.go`: local document and packet-capture extraction utilities.
@@ -57,7 +58,7 @@ On macOS and Linux, interactive stdin prompts (`[goal]:`, clarification, revisio
 
 ## Terminal Lifecycle
 
-Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, optional attachment path, and an optional writable root. Runs without an explicitly authorized writable root remain answer-only for generated file content.
+Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, optional attachment path, an optional writable root, and optional comma-separated skill names. Runs without an explicitly authorized writable root remain answer-only for generated file content.
 
 The selected system prompt is captured as the immutable base prompt for each run and combined with the embedded agent protocol. An attachment remains at its existing local path. Supported image attachments are base64-encoded into Ollama messages for worker and critic vision analysis, capped at 20 MiB. Other attachments have their text extracted via `fileextract.go` (PDF, DOCX, PPTX, DOC, PCAP/PCAPNG/CAP, and plain text, capped at 20 MiB) and share a 64 KiB inline-text budget per run. Files attached through a directory initially include at most a 1 KiB excerpt each; metadata and paths remain in the prompt so the worker can inspect selected files with allowed tools. If extraction fails or the file is too large, the note names the path for tool-based inspection. A plain objective can infer an existing absolute image path, while `/agent` and the API accept explicit attachment paths. `/attach` persists a file or directory's regular files across subsequent terminal runs. `/deattach`/`/detach` clears all persistent attachments, or a single one when given a path; `/attached` lists the current set. At most 30 files are attached per run. Attached file metadata is carried on the run as `AttachmentNote` and included in the objective seen by the worker and critic; images are additionally sent as native Ollama message content.
 
@@ -98,6 +99,7 @@ Supported actions are:
 - `get_job`
 - `cancel_job`
 - `list_jobs`
+- `load_skill`
 - `list_directory`
 - `search_files`
 - `write_file`
@@ -110,6 +112,20 @@ The decoder requires exactly one JSON object and rejects unknown fields or trail
 `list_directory` and `search_files` are native Go implementations, not shell commands; they bypass the command allowlist entirely and cannot fail on shell syntax. `list_directory` walks a directory up to `maxDepth` (default and max 6), capped at 2000 entries. `search_files` runs a Go regular expression across a file or a directory's text files (skipping binaries and files over 2 MiB), capped at 200 matches.
 
 `write_file` is a native Go operation for complete file content, including multiline source. It is available only beneath existing writable roots explicitly authorized at run creation. Parent directories must already exist. Destinations default to no-overwrite; explicit overwrite replaces only an existing regular file. Writes use restrictive permissions and per-file atomic commit, are capped at 256 KiB per file, 50 files and 1 MiB per run, and record only resolved path and byte-count evidence rather than file content. Up to 32 KiB of written content is retained only in memory for the independent critic; it is excluded from API events, model history, logs, and persisted snapshots. Symlink escapes and non-regular destinations are rejected. Successful file creation completes a write-only code goal; it does not authorize building, testing, running, starting, or probing generated code.
+
+## External Skills
+
+Skills are reusable task instructions stored at `~/.recon/skills/<name>/SKILL.md`. They are external, not built into the binary. See the [README example](README.md#external-skills) for the file format and setup.
+
+**Prompts define the role; skills explain a task.** A run uses one base prompt and can load several skills. Both follow the embedded agent protocol and the user's constraints.
+
+- **Selection:** `/skills` lists available skills. `/agent` accepts comma-separated names; the API accepts `"skills":["report"]`. The worker can also select a skill using `{"action":"load_skill","skill":"report"}`, consuming one iteration.
+- **Run lifecycle:** files are read once when a run starts. Only names and descriptions reach the worker until selected. Active instructions stay in worker and critic context through compaction, feedback, and continuation. Disk edits affect new runs only.
+- **Audit:** snapshots save active instructions but do not support restart/resume. API fields `availableSkills` and `activeSkills` expose names and descriptions, not instruction bodies.
+- **Discovery:** only immediate, non-hidden skill folders are scanned. Directory symlinks and folders without `SKILL.md` are ignored; skill files cannot be symlinks. No skills directory is required. Invalid files or unknown explicitly selected names prevent run creation; worker loading errors become observations.
+- **Limits:** 64 installed skills, 16 KiB per UTF-8 file, and 8 active skills totaling at most 64 KiB of instructions. Active instructions add to the normal context budget.
+
+Install only trusted skills without secrets: active instructions are sent to Ollama and saved locally. Skills cannot grant command, write, or generated-code execution permissions, and loading one does not prove its steps were performed. This version supports instructions only, with no automatic script execution, supporting-file loading, downloads, or project-local discovery.
 
 ## Limits and Verification
 
@@ -141,6 +157,7 @@ New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s sing
 - Preserve the worker-owned loop, planning, critic, retries, context compaction, evidence, jobs, attachments, clarification, revision, approval, cancellation, and limits.
 - Keep agent actions strict and machine-readable.
 - Keep bundled prompts embedded so the binary remains standalone.
+- Keep skills external and optional; preserve active skill instructions across compaction and continuation without expanding run permissions.
 - Keep run snapshots compatible when practical.
 - Do not add a Web UI without an explicit product change.
 

@@ -44,6 +44,8 @@ type agentAPIRunResponse struct {
 	AvailableCommands   []string        `json:"availableCommands"`
 	UnavailableCommands []string        `json:"unavailableCommands,omitempty"`
 	WritableRoots       []string        `json:"writableRoots,omitempty"`
+	AvailableSkills     []SkillMetadata `json:"availableSkills,omitempty"`
+	ActiveSkills        []SkillMetadata `json:"activeSkills,omitempty"`
 }
 
 type agentAPIFeedbackRequest struct {
@@ -321,6 +323,8 @@ func newAgentAPIRunResponse(run *AgentRun) agentAPIRunResponse {
 		AvailableCommands:   run.AvailableCommands,
 		UnavailableCommands: run.UnavailableCommands,
 		WritableRoots:       append([]string(nil), run.WritableRoots...),
+		AvailableSkills:     append([]SkillMetadata(nil), run.AvailableSkills...),
+		ActiveSkills:        agentSkillMetadata(run.ActiveSkills),
 	}
 }
 
