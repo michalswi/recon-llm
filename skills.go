@@ -30,6 +30,17 @@ type AgentSkill struct {
 	Instructions string `json:"instructions"`
 }
 
+// skillContextWarnPercent is the share of OLLAMA_NUM_CTX that estimated active
+// skill instructions may reach before an advisory warning is emitted.
+const skillContextWarnPercent = 25
+
+// skillIssue describes an installed skill that discovery skipped. Name is the
+// skill's directory name, which is how users select skills.
+type skillIssue struct {
+	Name string
+	Err  error
+}
+
 var agentSkillNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 func handleTerminalSkillCommand(args []string) error {
@@ -48,16 +59,17 @@ func handleTerminalSkillCommand(args []string) error {
 		if len(args) != 2 {
 			return errors.New(usage)
 		}
-		catalog, err := discoverAgentSkills()
+		catalog, issues, err := discoverAgentSkills()
 		if err != nil {
 			return err
 		}
+		printSkillIssues(issues)
 		names := appendUniquePaths(append([]string(nil), terminalSkillNames...), args[1])
 		// Validate the complete selection before changing terminal state.
 		selection := &agentSession{AgentRun: &AgentRun{}, skillCatalog: catalog}
 		for _, name := range names {
 			if err := selection.activateAgentSkill(name); err != nil {
-				return err
+				return skillSelectionError(err, name, issues)
 			}
 		}
 		terminalSkillNames = names
@@ -86,10 +98,11 @@ func handleTerminalSkillCommand(args []string) error {
 		if len(args) != 1 {
 			return errors.New(usage)
 		}
-		catalog, err := discoverAgentSkills()
+		catalog, issues, err := discoverAgentSkills()
 		if err != nil {
 			return err
 		}
+		printSkillIssues(issues)
 		if len(catalog) == 0 {
 			fmt.Println(info("No skills found. Add ~/.recon/skills/<name>/SKILL.md to install a trusted local skill."))
 		}
@@ -110,20 +123,26 @@ func handleTerminalSkillCommand(args []string) error {
 	return nil
 }
 
-func discoverAgentSkills() ([]AgentSkill, error) {
+// discoverAgentSkills returns every valid installed skill. A skill that cannot
+// be read or validated is skipped and reported as an issue so one bad file does
+// not disable the rest of the catalog. Only failures affecting the whole
+// catalog (unreadable directory, too many skills) are returned as errors.
+func discoverAgentSkills() ([]AgentSkill, []skillIssue, error) {
 	home, err := reconHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root := filepath.Join(home, "skills")
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read skills directory: %w", err)
+		return nil, nil, fmt.Errorf("read skills directory: %w", err)
 	}
 	var skills []AgentSkill
+	var issues []skillIssue
+	candidates := 0
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
@@ -133,22 +152,48 @@ func discoverAgentSkills() ([]AgentSkill, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		// Invalid skills count toward the limit so the scan stays bounded.
+		candidates++
+		if candidates > maxAgentSkills {
+			return nil, nil, fmt.Errorf("skills directory exceeds %d skills", maxAgentSkills)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("inspect skill %q: %w", path, err)
+			issues = append(issues, skillIssue{entry.Name(), fmt.Errorf("inspect skill %q: %w", path, err)})
+			continue
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("skill %q must be a regular file, not a symlink or directory", path)
-		}
-		if len(skills) >= maxAgentSkills {
-			return nil, fmt.Errorf("skills directory exceeds %d skills", maxAgentSkills)
+			issues = append(issues, skillIssue{entry.Name(), fmt.Errorf("skill %q must be a regular file, not a symlink or directory", path)})
+			continue
 		}
 		skill, err := readAgentSkill(path, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("read skill %q: %w", path, err)
+			issues = append(issues, skillIssue{entry.Name(), fmt.Errorf("read skill %q: %w", path, err)})
+			continue
 		}
 		skills = append(skills, skill)
 	}
-	return skills, nil
+	return skills, issues, nil
+}
+
+func skillIssueWarning(issue skillIssue) string {
+	return fmt.Sprintf("Skipping invalid skill: %v", issue.Err)
+}
+
+func printSkillIssues(issues []skillIssue) {
+	for _, issue := range issues {
+		fmt.Fprintln(os.Stderr, warn("Warning: "+skillIssueWarning(issue)))
+	}
+}
+
+// skillSelectionError explains why an explicitly requested skill is missing
+// when it was skipped as invalid rather than simply not installed.
+func skillSelectionError(err error, name string, issues []skillIssue) error {
+	for _, issue := range issues {
+		if issue.Name == name {
+			return fmt.Errorf("skill %q is unavailable: %w", name, issue.Err)
+		}
+	}
+	return err
 }
 
 func readAgentSkill(path, directoryName string) (AgentSkill, error) {
@@ -247,4 +292,23 @@ func agentSkillInstructions(run *AgentRun) string {
 		fmt.Fprintf(&text, "\n--- SKILL %s ---\n%s\n--- END SKILL %s ---\n", skill.Name, skill.Instructions, skill.Name)
 	}
 	return text.String()
+}
+
+// skillContextWarning is an advisory estimate of the active skill instructions
+// against OLLAMA_NUM_CTX. It ignores the rest of the prompt and returns ""
+// when OLLAMA_NUM_CTX is unset because the effective window is then unknown.
+func (sess *agentSession) skillContextWarning() string {
+	if ollamaNumCtx <= 0 {
+		return ""
+	}
+	sess.mu.Lock()
+	var tokens int
+	if sess.AgentRun != nil {
+		tokens = estimateAgentTokens(agentSkillInstructions(sess.AgentRun))
+	}
+	sess.mu.Unlock()
+	if tokens == 0 || tokens*100 < ollamaNumCtx*skillContextWarnPercent {
+		return ""
+	}
+	return fmt.Sprintf("Estimated skill context is about %d tokens (%d%% of OLLAMA_NUM_CTX=%d). This is advisory and excludes the rest of the prompt; consider fewer or shorter skills, or a larger OLLAMA_NUM_CTX.", tokens, tokens*100/ollamaNumCtx, ollamaNumCtx)
 }

@@ -29,15 +29,15 @@ func writeTestSkill(t *testing.T, name, document string) string {
 
 func TestDiscoverAgentSkills(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	skills, err := discoverAgentSkills()
+	skills, _, err := discoverAgentSkills()
 	if err != nil || len(skills) != 0 {
 		t.Fatalf("absent directory should be optional: %v, %v", skills, err)
 	}
 	writeTestSkill(t, "report", "---\r\nname: report\r\ndescription: >-\r\n  Summarize findings:\r\n  use a table.\r\n---\r\nReport only observed facts.\r\n")
 	writeTestSkill(t, "analysis", "---\nname: analysis\ndescription: \"Analyze: supplied text\"\n---\nSeparate facts from assumptions.")
-	skills, err = discoverAgentSkills()
-	if err != nil {
-		t.Fatal(err)
+	skills, issues, err := discoverAgentSkills()
+	if err != nil || len(issues) != 0 {
+		t.Fatal(err, issues)
 	}
 	if len(skills) != 2 || skills[0].Name != "analysis" || skills[1].Name != "report" {
 		t.Fatalf("expected sorted catalog: %#v", skills)
@@ -47,7 +47,7 @@ func TestDiscoverAgentSkills(t *testing.T) {
 	}
 }
 
-func TestDiscoverAgentSkillsRejectsInvalidDocuments(t *testing.T) {
+func TestDiscoverAgentSkillsSkipsInvalidDocuments(t *testing.T) {
 	cases := map[string]string{
 		"missing frontmatter":  "Report facts.",
 		"unclosed frontmatter": "---\nname: report\ndescription: Report findings",
@@ -66,14 +66,22 @@ func TestDiscoverAgentSkillsRejectsInvalidDocuments(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			path := writeTestSkill(t, "report", document)
-			if _, err := discoverAgentSkills(); err == nil || !strings.Contains(err.Error(), path) {
-				t.Fatalf("expected a path-specific error, got %v", err)
+			writeTestSkill(t, "good", "---\nname: good\ndescription: Good skill\n---\nUse facts.")
+			skills, issues, err := discoverAgentSkills()
+			if err != nil {
+				t.Fatalf("invalid skill must not fail discovery: %v", err)
+			}
+			if len(skills) != 1 || skills[0].Name != "good" {
+				t.Fatalf("valid sibling should survive: %#v", skills)
+			}
+			if len(issues) != 1 || issues[0].Name != "report" || !strings.Contains(issues[0].Err.Error(), path) {
+				t.Fatalf("expected a folder-keyed, path-specific issue, got %#v", issues)
 			}
 		})
 	}
 }
 
-func TestDiscoverAgentSkillsRejectsNonRegularFileAndCatalogOverflow(t *testing.T) {
+func TestDiscoverAgentSkillsSkipsNonRegularFileAndRejectsCatalogOverflow(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		path := writeTestSkill(t, "report", "placeholder")
@@ -87,8 +95,9 @@ func TestDiscoverAgentSkillsRejectsNonRegularFileAndCatalogOverflow(t *testing.T
 		if err := os.Symlink(target, path); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := discoverAgentSkills(); err == nil {
-			t.Fatal("expected symlink skill file to be rejected")
+		skills, issues, err := discoverAgentSkills()
+		if err != nil || len(skills) != 0 || len(issues) != 1 || issues[0].Name != "report" {
+			t.Fatalf("expected symlink skill to be skipped: %v %v %v", skills, issues, err)
 		}
 	})
 	t.Run("catalog overflow", func(t *testing.T) {
@@ -97,8 +106,17 @@ func TestDiscoverAgentSkillsRejectsNonRegularFileAndCatalogOverflow(t *testing.T
 			name := fmt.Sprintf("skill-%d", i)
 			writeTestSkill(t, name, fmt.Sprintf("---\nname: %s\ndescription: Analyze facts\n---\nUse facts.", name))
 		}
-		if _, err := discoverAgentSkills(); err == nil {
+		if _, _, err := discoverAgentSkills(); err == nil {
 			t.Fatal("expected oversized catalog to be rejected")
+		}
+	})
+	t.Run("invalid skills count toward the limit", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		for i := 0; i <= maxAgentSkills; i++ {
+			writeTestSkill(t, fmt.Sprintf("skill-%d", i), "not a skill")
+		}
+		if _, _, err := discoverAgentSkills(); err == nil {
+			t.Fatal("expected invalid candidates to count toward the catalog limit")
 		}
 	})
 }
@@ -407,5 +425,96 @@ func TestTerminalSkillsOffByDefaultAndModeSwitches(t *testing.T) {
 	resumeAgent(sess, "")
 	if !sess.AgentRun.SkillsDisabled || sess.activateAgentSkill("report") == nil {
 		t.Fatal("mode changes must not enable skills on an existing disabled run")
+	}
+}
+
+func TestInvalidSkillsAreWarnedAndExplicitSelectionExplains(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	previous, previousAuto := terminalSkillNames, terminalSkillsAuto
+	terminalSkillNames, terminalSkillsAuto = nil, false
+	t.Cleanup(func() { terminalSkillNames, terminalSkillsAuto = previous, previousAuto })
+	writeTestSkill(t, "good", "---\nname: good\ndescription: Good skill\n---\nUse facts.")
+	writeTestSkill(t, "broken", "---\nname: other\ndescription: Mismatched name\n---\nUse facts.")
+
+	sess, err := newTerminalAgentSession(AgentRequest{Goal: "summarize facts"})
+	if err != nil {
+		t.Fatalf("invalid skill must not block run creation: %v", err)
+	}
+	run := sess.agentSnapshot()
+	if len(run.AvailableSkills) != 1 || run.AvailableSkills[0].Name != "good" {
+		t.Fatalf("expected only the valid skill: %#v", run.AvailableSkills)
+	}
+	warnings := 0
+	for _, event := range run.Events {
+		if event.Kind == "warning" && strings.Contains(event.Text, "broken") {
+			warnings++
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("expected one warning event for the invalid skill: %#v", run.Events)
+	}
+
+	_, err = newTerminalAgentSession(AgentRequest{Goal: "summarize facts", Skills: []string{"broken"}})
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("explicitly selecting an invalid skill must explain why: %v", err)
+	}
+
+	if err := handleTerminalSkillCommand([]string{"attach", "good"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handleTerminalSkillCommand([]string{"attach", "broken"}); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("attaching an invalid skill must fail: %v", err)
+	}
+	if len(terminalSkillNames) != 1 || terminalSkillNames[0] != "good" {
+		t.Fatalf("failed attach changed the selection: %v", terminalSkillNames)
+	}
+}
+
+func TestDisabledSkillsSkipDiscoveryAndWarnings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestSkill(t, "broken", "not a skill")
+	sess, err := newTerminalAgentSession(AgentRequest{Goal: "summarize facts", skillsDisabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range sess.agentSnapshot().Events {
+		if event.Kind == "warning" {
+			t.Fatalf("disabled skills must not scan or warn: %#v", event)
+		}
+	}
+}
+
+func TestSkillContextWarningThreshold(t *testing.T) {
+	previous := ollamaNumCtx
+	t.Cleanup(func() { ollamaNumCtx = previous })
+	sess := &agentSession{AgentRun: &AgentRun{ActiveSkills: []AgentSkill{{
+		SkillMetadata: SkillMetadata{Name: "report", Description: "Report"},
+		Instructions:  strings.Repeat("x", 400),
+	}}}}
+	tokens := estimateAgentTokens(agentSkillInstructions(sess.AgentRun))
+
+	ollamaNumCtx = 0
+	if sess.skillContextWarning() != "" {
+		t.Fatal("unset OLLAMA_NUM_CTX must not warn")
+	}
+	ollamaNumCtx = tokens * 4 // exactly 25%
+	if sess.skillContextWarning() == "" {
+		t.Fatal("expected a warning at exactly the threshold")
+	}
+	ollamaNumCtx = tokens*4 + 1 // just under 25%
+	if sess.skillContextWarning() != "" {
+		t.Fatal("unexpected warning below the threshold")
+	}
+
+	ollamaNumCtx = tokens * 4
+	loaded := &agentSession{AgentRun: newAgentRun("run", "goal", "base", "base"), skillCatalog: sess.AgentRun.ActiveSkills}
+	loaded.eventSink = nil
+	executeAgentAction(context.Background(), loaded, ToolResponse{Action: "load_skill", Skill: "report"})
+	var warned bool
+	for _, event := range loaded.agentSnapshot().Events {
+		warned = warned || event.Kind == "warning"
+	}
+	if !warned {
+		t.Fatal("load_skill should emit a warning event when the threshold is reached")
 	}
 }

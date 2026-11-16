@@ -1323,6 +1323,9 @@ func executeAgentAction(ctx context.Context, sess *agentSession, action ToolResp
 			sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Skill: action.Skill, Text: err.Error()})
 		} else {
 			sess.appendAgentEvent(AgentEvent{Kind: "observation", Action: action.Action, Skill: action.Skill, Text: "Skill loaded: " + action.Skill + ". Its instructions remain in the active skill context.", Success: true})
+			if warning := sess.skillContextWarning(); warning != "" {
+				sess.appendAgentEvent(AgentEvent{Kind: "warning", Action: action.Action, Skill: action.Skill, Text: warning})
+			}
 		}
 		return true
 	case "answer":

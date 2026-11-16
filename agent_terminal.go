@@ -451,8 +451,9 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		return nil, err
 	}
 	var skills []AgentSkill
+	var skillIssues []skillIssue
 	if !request.skillsDisabled {
-		skills, err = discoverAgentSkills()
+		skills, skillIssues, err = discoverAgentSkills()
 		if err != nil {
 			return nil, err
 		}
@@ -554,7 +555,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	sess.AgentRun = run
 	for _, name := range request.Skills {
 		if err := sess.activateAgentSkill(name); err != nil {
-			return nil, err
+			return nil, skillSelectionError(err, name, skillIssues)
 		}
 	}
 	run.SkillsDisabled = request.skillsDisabled
@@ -562,6 +563,12 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		run.ManualSkills = true
 		sess.skillCatalog = append([]AgentSkill(nil), run.ActiveSkills...)
 		run.AvailableSkills = agentSkillMetadata(sess.skillCatalog)
+	}
+	for _, issue := range skillIssues {
+		sess.appendAgentEvent(AgentEvent{Kind: "warning", Text: skillIssueWarning(issue)})
+	}
+	if text := sess.skillContextWarning(); text != "" {
+		sess.appendAgentEvent(AgentEvent{Kind: "warning", Text: text})
 	}
 	if err := sess.persist(); err != nil {
 		return nil, err
@@ -746,6 +753,8 @@ func printAgentEvent(event AgentEvent) {
 		fmt.Println(info("Critic requested revision:"), event.Text)
 	case "error", "invalid_action":
 		fmt.Println(warn("Agent error:"), formatAgentDisplayText(event.Text))
+	case "warning":
+		fmt.Fprintln(os.Stderr, warn("Warning: "+event.Text))
 	}
 }
 

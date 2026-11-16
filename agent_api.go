@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -146,7 +147,11 @@ func (api *agentAPI) handleRuns(response http.ResponseWriter, request *http.Requ
 		writeAgentAPIError(response, http.StatusBadRequest, err.Error())
 		return
 	}
-	session.eventSink = nil
+	session.eventSink = func(event AgentEvent) {
+		if event.Kind == "warning" {
+			fmt.Fprintf(os.Stderr, "[AGENT] session=%s warning: %s\n", session.ID, event.Text)
+		}
+	}
 	entry := &apiAgentRun{session: session}
 	run := session.agentSnapshot()
 

@@ -158,7 +158,7 @@ No rebuild is needed. Edit the file to change the checklist; changes apply to ne
 
 **File rules:** the header accepts only `name` and `description`. Names use lowercase letters, digits, and single separating hyphens (up to 64 characters). Descriptions can be up to 512 bytes; instructions must not be empty.
 
-**Limits:** 64 installed skills, 16 KiB per file, and 8 active skills totaling at most 64 KiB of instructions. Invalid skill files prevent a run from starting.
+**Limits:** 64 installed skills, 16 KiB per file, and 8 active skills totaling at most 64 KiB of instructions. Invalid skill files are skipped with a warning; explicitly selecting one fails with the reason. If `OLLAMA_NUM_CTX` is set, recon warns when estimated active-skill tokens reach 25% of it (advisory; the rest of the prompt is not counted).
 
 **Trust:** use only reviewed skills, without secrets: active instructions go to Ollama and local run snapshots. Skills do not grant extra permissions or override the agent protocol. This version does not automatically run scripts, load supporting files, or download skills. See [APP.md](APP.md#external-skills) for lifecycle details.
 
