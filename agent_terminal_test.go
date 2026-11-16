@@ -33,6 +33,17 @@ func TestReadStructuredAgentRequest(t *testing.T) {
 	}
 }
 
+func TestReadStructuredAgentRequestSkills(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("report\nread only\nall facts cited\n\n\nreport, analysis\n"))
+	request, err := readStructuredAgentRequest(reader, "summarize")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Skills) != 2 || request.Skills[0] != "report" || request.Skills[1] != "analysis" {
+		t.Fatalf("skill selection not preserved: %#v", request.Skills)
+	}
+}
+
 func TestTerminalIterationBudgetDecision(t *testing.T) {
 	for _, decision := range []string{"c\na\n", "invalid\ns\n", ""} {
 		t.Run(decision, func(t *testing.T) {

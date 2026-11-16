@@ -30,6 +30,9 @@ type AgentRequest struct {
 	FilePath           string   `json:"filePath,omitempty"`
 	FilePaths          []string `json:"filePaths,omitempty"`
 	WritableRoots      []string `json:"writableRoots,omitempty"`
+	Skills             []string `json:"skills,omitempty"`
+	attachedSkillsOnly bool
+	skillsDisabled     bool
 }
 
 const (
@@ -42,6 +45,17 @@ const (
 )
 
 var terminalAttachmentPaths []string
+var terminalSkillNames []string
+var terminalSkillsAuto bool
+
+func newQuickAgentRequest(goal string) AgentRequest {
+	return AgentRequest{
+		Goal:               goal,
+		Skills:             append([]string(nil), terminalSkillNames...),
+		attachedSkillsOnly: len(terminalSkillNames) > 0,
+		skillsDisabled:     len(terminalSkillNames) == 0 && !terminalSkillsAuto,
+	}
+}
 
 func main() {
 	checkOllamaFlag := flag.Bool("check-ollama", false, "check whether the configured Ollama server is reachable, then exit")
@@ -130,7 +144,7 @@ func main() {
 			fmt.Println(warn("Unknown command:"), line)
 			continue
 		} else {
-			request = AgentRequest{Goal: line}
+			request = newQuickAgentRequest(line)
 		}
 		if err != nil {
 			fmt.Println(warn("Input error:"), err)
@@ -238,6 +252,14 @@ func handleAgentCLICommand(input string) bool {
 		fmt.Printf("%s %d file(s) remain attached.\n", info("Detached:"), len(terminalAttachmentPaths))
 	case "/sysprompt":
 		printSystemPrompt()
+	case "/skills":
+		if err := handleTerminalSkillCommand([]string{"list"}); err != nil {
+			fmt.Println(warn("Skill error:"), err)
+		}
+	case "/skill":
+		if err := handleTerminalSkillCommand(parts[1:]); err != nil {
+			fmt.Println(warn("Skill error:"), err)
+		}
 	case "/editsysprompt":
 		handleEditSystemPrompt()
 	case "/think-on":
@@ -284,7 +306,22 @@ func readStructuredAgentRequest(reader *bufio.Reader, initialGoal string) (Agent
 	if strings.TrimSpace(writableRoot) != "" {
 		request.WritableRoots = []string{writableRoot}
 	}
-	return request, err
+	if err != nil {
+		return AgentRequest{}, err
+	}
+	skills, err := promptLine(reader, "Skills (optional, comma-separated names; /skills lists them): ")
+	if errors.Is(err, io.EOF) {
+		return request, nil
+	}
+	if err != nil {
+		return AgentRequest{}, err
+	}
+	if skills != "" {
+		for _, name := range strings.Split(skills, ",") {
+			request.Skills = append(request.Skills, strings.TrimSpace(name))
+		}
+	}
+	return request, nil
 }
 
 func runTerminalAgent(reader *bufio.Reader, request AgentRequest) error {
@@ -413,6 +450,14 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	var skills []AgentSkill
+	var skillIssues []skillIssue
+	if !request.skillsDisabled {
+		skills, skillIssues, err = discoverAgentSkills()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	sessionID := fmt.Sprintf("run_%d", time.Now().UnixNano())
 	sess := &agentSession{
@@ -424,6 +469,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		OriginalPromptName: systemPromptName,
 		AgentStart:         0,
 		ThinkingEnabled:    thinkingEnabled,
+		skillCatalog:       skills,
 	}
 	sess.eventSink = printAgentEvent
 
@@ -498,6 +544,7 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	}
 	run := newAgentRun(sessionID, goalDescription, systemPrompt, systemPromptName)
 	run.WritableRoots = writableRoots
+	run.AvailableSkills = agentSkillMetadata(skills)
 	run.AttachmentNote = strings.TrimSpace(attachmentNote.String())
 	run.GoalSpec = normalizeAgentGoalSpec(AgentGoalSpec{
 		Objective:          request.Goal,
@@ -506,6 +553,23 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		CompletionCriteria: request.CompletionCriteria,
 	})
 	sess.AgentRun = run
+	for _, name := range request.Skills {
+		if err := sess.activateAgentSkill(name); err != nil {
+			return nil, skillSelectionError(err, name, skillIssues)
+		}
+	}
+	run.SkillsDisabled = request.skillsDisabled
+	if request.attachedSkillsOnly {
+		run.ManualSkills = true
+		sess.skillCatalog = append([]AgentSkill(nil), run.ActiveSkills...)
+		run.AvailableSkills = agentSkillMetadata(sess.skillCatalog)
+	}
+	for _, issue := range skillIssues {
+		sess.appendAgentEvent(AgentEvent{Kind: "warning", Text: skillIssueWarning(issue)})
+	}
+	if text := sess.skillContextWarning(); text != "" {
+		sess.appendAgentEvent(AgentEvent{Kind: "warning", Text: text})
+	}
 	if err := sess.persist(); err != nil {
 		return nil, err
 	}
@@ -689,6 +753,8 @@ func printAgentEvent(event AgentEvent) {
 		fmt.Println(info("Critic requested revision:"), event.Text)
 	case "error", "invalid_action":
 		fmt.Println(warn("Agent error:"), formatAgentDisplayText(event.Text))
+	case "warning":
+		fmt.Fprintln(os.Stderr, warn("Warning: "+event.Text))
 	}
 }
 

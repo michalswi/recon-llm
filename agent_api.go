@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,8 @@ type agentAPIRunResponse struct {
 	AvailableCommands   []string        `json:"availableCommands"`
 	UnavailableCommands []string        `json:"unavailableCommands,omitempty"`
 	WritableRoots       []string        `json:"writableRoots,omitempty"`
+	AvailableSkills     []SkillMetadata `json:"availableSkills,omitempty"`
+	ActiveSkills        []SkillMetadata `json:"activeSkills,omitempty"`
 }
 
 type agentAPIFeedbackRequest struct {
@@ -144,7 +147,11 @@ func (api *agentAPI) handleRuns(response http.ResponseWriter, request *http.Requ
 		writeAgentAPIError(response, http.StatusBadRequest, err.Error())
 		return
 	}
-	session.eventSink = nil
+	session.eventSink = func(event AgentEvent) {
+		if event.Kind == "warning" {
+			fmt.Fprintf(os.Stderr, "[AGENT] session=%s warning: %s\n", session.ID, event.Text)
+		}
+	}
 	entry := &apiAgentRun{session: session}
 	run := session.agentSnapshot()
 
@@ -321,6 +328,8 @@ func newAgentAPIRunResponse(run *AgentRun) agentAPIRunResponse {
 		AvailableCommands:   run.AvailableCommands,
 		UnavailableCommands: run.UnavailableCommands,
 		WritableRoots:       append([]string(nil), run.WritableRoots...),
+		AvailableSkills:     append([]SkillMetadata(nil), run.AvailableSkills...),
+		ActiveSkills:        agentSkillMetadata(run.ActiveSkills),
 	}
 }
 

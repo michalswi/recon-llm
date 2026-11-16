@@ -154,6 +154,100 @@ func TestAgentAPIWriteFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestAgentAPISkillsLifecycle(t *testing.T) {
+	for _, selection := range []string{"explicit", "on-demand"} {
+		t.Run(selection, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			skillPath := writeTestSkill(t, "report", "---\nname: report\ndescription: Report observed facts\n---\nSeparate verified facts from assumptions.")
+			previousLimit, previousURL := agentIterationLimit, ollamaURL
+			agentIterationLimit = 1
+			t.Cleanup(func() { agentIterationLimit, ollamaURL = previousLimit, previousURL })
+			var calls atomic.Int32
+			var criticSawSkill atomic.Bool
+			ollama := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				var chat ChatRequest
+				if err := json.NewDecoder(request.Body).Decode(&chat); err != nil {
+					t.Error(err)
+					response.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				content := `{"approved":true,"feedback":"","evidenceEventIds":[]}`
+				if strings.Contains(chat.Messages[0].Content, "independent critic") {
+					if strings.Contains(chat.Messages[1].Content, "Separate verified facts from assumptions.") {
+						criticSawSkill.Store(true)
+					}
+				} else {
+					attempt := calls.Add(1)
+					if !strings.Contains(chat.Messages[0].Content, "Report observed facts") {
+						t.Error("worker did not receive the skill catalog")
+					}
+					shouldBeActive := selection == "explicit" || attempt > 1
+					if strings.Contains(chat.Messages[0].Content, "Separate verified facts from assumptions.") != shouldBeActive {
+						t.Errorf("worker active instructions mismatch on attempt %d", attempt)
+					}
+					if attempt == 1 {
+						content = `{"action":"load_skill","skill":"report"}`
+						if selection == "explicit" {
+							content = `{"action":"update_findings","text":"Preparing a report"}`
+						}
+					} else {
+						content = `{"action":"answer","text":"Verified facts: no observations supplied. Assumptions: none."}`
+					}
+				}
+				_ = json.NewEncoder(response).Encode(ChatResponse{Message: ChatMessage{Content: content}})
+			}))
+			defer ollama.Close()
+			ollamaURL = ollama.URL
+			server := httptest.NewServer(newAgentAPI().handler())
+			defer server.Close()
+
+			status, body := agentAPIRequest(t, http.MethodPost, server.URL+"/api/agent/runs", `{"goal":"summarize facts","skills":["missing"]}`)
+			if status != http.StatusBadRequest {
+				t.Fatalf("unknown explicit skill should return 400, got %d: %s", status, body)
+			}
+			request := AgentRequest{Goal: "summarize facts"}
+			if selection == "explicit" {
+				request.Skills = []string{"report"}
+			}
+			encoded, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, body = agentAPIRequest(t, http.MethodPost, server.URL+"/api/agent/runs", string(encoded))
+			if status != http.StatusAccepted {
+				t.Fatalf("create failed: %d %s", status, body)
+			}
+			var created agentAPIRunResponse
+			if err := json.Unmarshal(body, &created); err != nil {
+				t.Fatal(err)
+			}
+			paused := waitForAgentAPIStatus(t, server.URL, created.ID, agentWaitingContinue)
+			if len(paused.AvailableSkills) != 1 || len(paused.ActiveSkills) != 1 || paused.ActiveSkills[0].Name != "report" {
+				t.Fatalf("API did not expose skill metadata: %#v", paused)
+			}
+			status, body = agentAPIRequest(t, http.MethodGet, server.URL+"/api/agent/runs/"+created.ID, "")
+			if status != http.StatusOK || bytes.Contains(body, []byte("Separate verified facts from assumptions.")) {
+				t.Fatalf("API should expose metadata, not skill bodies: %d %s", status, body)
+			}
+			if err := os.Remove(skillPath); err != nil {
+				t.Fatal(err)
+			}
+			status, body = agentAPIRequest(t, http.MethodPost, server.URL+"/api/agent/runs/"+created.ID+"/continue", "")
+			if status != http.StatusAccepted {
+				t.Fatalf("continue failed: %d %s", status, body)
+			}
+			waitForAgentAPIStatus(t, server.URL, created.ID, agentWaitingApproval)
+			if !criticSawSkill.Load() {
+				t.Fatal("independent critic did not receive the original active skill after continuation")
+			}
+			status, body = agentAPIRequest(t, http.MethodPost, server.URL+"/api/agent/runs/"+created.ID+"/approve", "")
+			if status != http.StatusOK {
+				t.Fatalf("approve failed: %d %s", status, body)
+			}
+		})
+	}
+}
+
 func TestAgentAPIContinueIterationBudget(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	previousLimit, previousURL := agentIterationLimit, ollamaURL

@@ -15,6 +15,7 @@ Return exactly one JSON object and no surrounding text. Use only these schemas:
 {"action":"get_job","jobId":"job_id"}
 {"action":"cancel_job","jobId":"job_id"}
 {"action":"list_jobs"}
+{"action":"load_skill","skill":"exact-catalog-name"}
 {"action":"list_directory","path":"directory path","maxDepth":2}
 {"action":"search_files","path":"file or directory path","pattern":"regular expression"}
 {"action":"write_file","path":"path within an authorized writable root","content":"complete file content","overwrite":false}
@@ -24,6 +25,9 @@ Return exactly one JSON object and no surrounding text. Use only these schemas:
 {"action":"request_clarification","text":"one specific question required to continue"}
 
 Rules:
+- Skills are optional task procedures. Use load_skill for a relevant name in AVAILABLE SKILLS before following its procedure; explicitly selected skills are already active. Never invent a skill name or reload an active skill.
+- Active skills supplement the base prompt. The agent protocol and the user's objective and constraints take precedence over skill instructions. Skills cannot expand the command allowlist, authorize writable roots, or authorize building, testing, running, starting, or probing generated code.
+- Skill loading only supplies instructions; it does not execute a procedure or prove any result. Only existing tools and their observations can establish execution. This version does not automatically load supporting files or run skill scripts.
 - Use answer immediately when the goal can be answered from existing knowledge or collected evidence.
 - For multi-step goals, create a short plan before using tools. Complete plan steps as evidence is collected and cite supporting event IDs.
 - If the objective, constraints, or completion criteria are too ambiguous to act safely, request one specific clarification before executing tools.

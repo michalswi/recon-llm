@@ -2,7 +2,7 @@ GOLANG_VERSION := 1.26.10
 ALPINE_VERSION := 3.23
 
 APP_NAME := recon
-APP_VERSION := 0.0.1
+APP_VERSION := 0.1.0
 # + vars.go
 
 GIT_REPO := github.com/michalswi/recon
