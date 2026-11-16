@@ -113,9 +113,9 @@ func handleTerminalSkillCommand(args []string) error {
 		return errors.New(usage)
 	}
 	if terminalSkillsAuto {
-		fmt.Println(info("No skills attached. Automatic skill selection is enabled for typed goals."))
+		fmt.Println(info("No skills attached. Automatic skill selection is enabled for typed goals. /agent is unchanged."))
 	} else if len(terminalSkillNames) == 0 {
-		fmt.Println(info("Skills are off for typed goals (default). Use /skill auto or /skill attach NAME to enable them."))
+		fmt.Println(info("Skills are off for typed goals (default). Use /skill auto or /skill attach NAME to enable them. /agent has its own Skills field and is unaffected."))
 	} else {
 		fmt.Println(info("Attached skills: " + strings.Join(terminalSkillNames, ", ")))
 		fmt.Println(info("Automatic skill selection is disabled for typed goals. /agent is unchanged."))
