@@ -31,6 +31,8 @@ type AgentRequest struct {
 	FilePaths          []string `json:"filePaths,omitempty"`
 	WritableRoots      []string `json:"writableRoots,omitempty"`
 	Skills             []string `json:"skills,omitempty"`
+	attachedSkillsOnly bool
+	skillsDisabled     bool
 }
 
 const (
@@ -43,6 +45,17 @@ const (
 )
 
 var terminalAttachmentPaths []string
+var terminalSkillNames []string
+var terminalSkillsAuto bool
+
+func newQuickAgentRequest(goal string) AgentRequest {
+	return AgentRequest{
+		Goal:               goal,
+		Skills:             append([]string(nil), terminalSkillNames...),
+		attachedSkillsOnly: len(terminalSkillNames) > 0,
+		skillsDisabled:     len(terminalSkillNames) == 0 && !terminalSkillsAuto,
+	}
+}
 
 func main() {
 	checkOllamaFlag := flag.Bool("check-ollama", false, "check whether the configured Ollama server is reachable, then exit")
@@ -131,7 +144,7 @@ func main() {
 			fmt.Println(warn("Unknown command:"), line)
 			continue
 		} else {
-			request = AgentRequest{Goal: line}
+			request = newQuickAgentRequest(line)
 		}
 		if err != nil {
 			fmt.Println(warn("Input error:"), err)
@@ -240,18 +253,12 @@ func handleAgentCLICommand(input string) bool {
 	case "/sysprompt":
 		printSystemPrompt()
 	case "/skills":
-		skills, err := discoverAgentSkills()
-		if err != nil {
-			fmt.Println(warn("Skill discovery failed:"), err)
-			break
+		if err := handleTerminalSkillCommand([]string{"list"}); err != nil {
+			fmt.Println(warn("Skill error:"), err)
 		}
-		if len(skills) == 0 {
-			fmt.Println(info("No skills found. Add ~/.recon/skills/<name>/SKILL.md to install a trusted local skill."))
-			break
-		}
-		fmt.Println(accent("Available skills (select through /agent, or let the worker load a relevant skill):"))
-		for _, skill := range skills {
-			fmt.Printf("  %s: %s\n", skill.Name, skill.Description)
+	case "/skill":
+		if err := handleTerminalSkillCommand(parts[1:]); err != nil {
+			fmt.Println(warn("Skill error:"), err)
 		}
 	case "/editsysprompt":
 		handleEditSystemPrompt()
@@ -443,9 +450,12 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	skills, err := discoverAgentSkills()
-	if err != nil {
-		return nil, err
+	var skills []AgentSkill
+	if !request.skillsDisabled {
+		skills, err = discoverAgentSkills()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	sessionID := fmt.Sprintf("run_%d", time.Now().UnixNano())
@@ -546,6 +556,12 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 		if err := sess.activateAgentSkill(name); err != nil {
 			return nil, err
 		}
+	}
+	run.SkillsDisabled = request.skillsDisabled
+	if request.attachedSkillsOnly {
+		run.ManualSkills = true
+		sess.skillCatalog = append([]AgentSkill(nil), run.ActiveSkills...)
+		run.AvailableSkills = agentSkillMetadata(sess.skillCatalog)
 	}
 	if err := sess.persist(); err != nil {
 		return nil, err

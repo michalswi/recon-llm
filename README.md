@@ -112,15 +112,31 @@ The header between `---` lines tells recon the skill's **name** and **when to us
 
 ### Use it in recon
 
-**You do not need `/agent` to use skills.** Type `/skills` to check that `ping-report` is installed, then enter your goal normally:
+**Skills are off by default for ordinary typed goals.** You do not need `/agent` to enable them. Type `/skills` to check that `ping-report` is installed, then enable automatic selection:
 
 ```text
+/skill auto
 analyze output from pinging google.com five times and make report
 ```
 
-The agent can choose and load `ping-report` based on its description. Automatic selection is the agent's decision; it is not guaranteed for every goal.
+In auto mode, the agent can choose and load `ping-report` based on its description. Automatic selection is the agent's decision; it is not guaranteed for every goal.
 
-**To explicitly select the skill**, use the optional `/agent` form:
+**To choose the skill yourself without a form:**
+
+```text
+/skill attach ping-report
+analyze output from pinging google.com five times and make report
+```
+
+- `/skill attach NAME` adds a skill for subsequent typed goals. While any skills are attached, only those skills are used and automatic selection is disabled.
+- `/skill detach NAME` removes one; `/skill detach` removes all. Detaching the last skill turns skills off.
+- `/skill off` disables skills and clears attached names.
+- `/skill auto` enables automatic selection and clears attached names.
+- `/skill list` (or `/skills`) shows available skills, attached names, and selection status.
+
+Modes and attachments last for the current terminal session and affect new runs only. A new terminal session starts with skills off. These settings do not change `/agent` or API requests.
+
+**Alternatively**, select a skill for one run using the optional `/agent` form:
 
 1. Type `/agent analyze output from pinging google.com five times and make report`.
 2. Press Enter to skip the optional fields until **Skills**. No attachment or writable folder is needed.

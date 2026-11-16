@@ -31,7 +31,11 @@ func printHelp() {
 		{"/deattach [PATH]", "Clear all persistent attachments, or just PATH (/detach also works)"},
 		{"/sysprompt", "Show the agent base prompt"},
 		{"/editsysprompt", "Select or enter an agent base prompt"},
-		{"/skills", "List external skills from ~/.recon/skills"},
+		{"/skills, /skill list", "List available and attached skills and automatic-selection status"},
+		{"/skill attach NAME", "Use this skill for typed goals; disable automatic selection"},
+		{"/skill detach [NAME]", "Detach one or all; last detach turns skills off"},
+		{"/skill off", "Disable skills for typed goals (default); clear attached skills"},
+		{"/skill auto", "Enable automatic selection for typed goals; clear attached skills"},
 		{"/think-on", "Enable model reasoning"},
 		{"/think-off", "Disable model reasoning"},
 	}

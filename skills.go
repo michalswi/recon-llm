@@ -32,6 +32,84 @@ type AgentSkill struct {
 
 var agentSkillNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+func handleTerminalSkillCommand(args []string) error {
+	const usage = "use /skill off, /skill auto, /skill attach NAME, /skill detach [NAME], or /skill list"
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	switch args[0] {
+	case "off", "auto":
+		if len(args) != 1 {
+			return errors.New(usage)
+		}
+		terminalSkillNames = nil
+		terminalSkillsAuto = args[0] == "auto"
+	case "attach":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		catalog, err := discoverAgentSkills()
+		if err != nil {
+			return err
+		}
+		names := appendUniquePaths(append([]string(nil), terminalSkillNames...), args[1])
+		// Validate the complete selection before changing terminal state.
+		selection := &agentSession{AgentRun: &AgentRun{}, skillCatalog: catalog}
+		for _, name := range names {
+			if err := selection.activateAgentSkill(name); err != nil {
+				return err
+			}
+		}
+		terminalSkillNames = names
+		terminalSkillsAuto = false
+	case "detach":
+		if len(args) > 2 {
+			return errors.New(usage)
+		}
+		if len(args) == 1 {
+			terminalSkillNames = nil
+		} else {
+			index := -1
+			for i, name := range terminalSkillNames {
+				if name == args[1] {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				return fmt.Errorf("skill %q is not attached", args[1])
+			}
+			terminalSkillNames = append(terminalSkillNames[:index], terminalSkillNames[index+1:]...)
+		}
+		terminalSkillsAuto = false
+	case "list":
+		if len(args) != 1 {
+			return errors.New(usage)
+		}
+		catalog, err := discoverAgentSkills()
+		if err != nil {
+			return err
+		}
+		if len(catalog) == 0 {
+			fmt.Println(info("No skills found. Add ~/.recon/skills/<name>/SKILL.md to install a trusted local skill."))
+		}
+		for _, skill := range catalog {
+			fmt.Printf("  %s: %s\n", skill.Name, skill.Description)
+		}
+	default:
+		return errors.New(usage)
+	}
+	if terminalSkillsAuto {
+		fmt.Println(info("No skills attached. Automatic skill selection is enabled for typed goals."))
+	} else if len(terminalSkillNames) == 0 {
+		fmt.Println(info("Skills are off for typed goals (default). Use /skill auto or /skill attach NAME to enable them."))
+	} else {
+		fmt.Println(info("Attached skills: " + strings.Join(terminalSkillNames, ", ")))
+		fmt.Println(info("Automatic skill selection is disabled for typed goals. /agent is unchanged."))
+	}
+	return nil
+}
+
 func discoverAgentSkills() ([]AgentSkill, error) {
 	home, err := reconHomeDir()
 	if err != nil {

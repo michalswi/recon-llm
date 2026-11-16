@@ -219,6 +219,7 @@ func TestAgentSkillDoesNotGrantPermissionsOrEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := validateAgentActionState(sess, sess.agentSnapshot(), ToolResponse{Action: "write_file"}); err == nil {
 		t.Fatal("skill must not authorize writable roots")
 	}
@@ -227,5 +228,184 @@ func TestAgentSkillDoesNotGrantPermissionsOrEvidence(t *testing.T) {
 	}
 	if agentEvidenceEventIsValid(AgentEvent{Kind: "observation", Action: "load_skill", Success: true}) {
 		t.Fatal("loading instructions must not prove execution")
+	}
+}
+
+func TestTerminalAttachedSkillsControlOnlyQuickRuns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	previous := terminalSkillNames
+	previousAuto := terminalSkillsAuto
+	terminalSkillsAuto = false
+	terminalSkillNames = nil
+	t.Cleanup(func() { terminalSkillNames, terminalSkillsAuto = previous, previousAuto })
+	for _, name := range []string{"report", "analysis"} {
+		writeTestSkill(t, name, fmt.Sprintf("---\nname: %s\ndescription: Help with facts\n---\nFollow the %s procedure.", name, name))
+	}
+	if !handleAgentCLICommand("/skill attach report") {
+		t.Fatal("skill command was not handled")
+	}
+	quick := newQuickAgentRequest("summarize facts")
+	sess, err := newTerminalAgentSession(quick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.eventSink = nil
+	run := sess.agentSnapshot()
+	if !run.ManualSkills || len(run.ActiveSkills) != 1 || run.ActiveSkills[0].Name != "report" || len(run.AvailableSkills) != 1 {
+		t.Fatalf("expected attached-only selection: %#v", run)
+	}
+	messages, err := agentMessages(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(messages[0].Content, "Automatic skill selection is disabled") {
+		t.Fatal("worker was not told automatic selection is disabled")
+	}
+	executeAgentAction(context.Background(), sess, ToolResponse{Action: "load_skill", Skill: "analysis"})
+	if event := sess.agentSnapshot().Events[0]; event.Success {
+		t.Fatal("worker loaded an unattached skill in manual mode")
+	}
+	// Structured/API requests retain their full catalog even while skills are attached.
+	structured, err := newTerminalAgentSession(AgentRequest{Goal: "summarize", Skills: []string{"report"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if structured.AgentRun.ManualSkills || len(structured.AgentRun.AvailableSkills) != 2 {
+		t.Fatal("terminal attachments changed structured/API behavior")
+	}
+	if err := structured.activateAgentSkill("analysis"); err != nil {
+		t.Fatal(err)
+	}
+	if err := handleTerminalSkillCommand([]string{"attach", "analysis"}); err != nil {
+		t.Fatal(err)
+	}
+	multiple, err := newTerminalAgentSession(newQuickAgentRequest("use both"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(multiple.AgentRun.ActiveSkills) != 2 {
+		t.Fatal("all attached skills must be activated before restricting the catalog")
+	}
+	if err := handleTerminalSkillCommand([]string{"detach", "report"}); err != nil {
+		t.Fatal(err)
+	}
+	next := newQuickAgentRequest("next goal")
+	if !next.attachedSkillsOnly || len(next.Skills) != 1 || next.Skills[0] != "analysis" {
+		t.Fatalf("partial detach changed mode: %#v", next)
+	}
+	if quick.Skills[0] != "report" {
+		t.Fatal("detaching mutated an existing request")
+	}
+	if err := handleTerminalSkillCommand([]string{"detach", "analysis"}); err != nil {
+		t.Fatal(err)
+	}
+	off, err := newTerminalAgentSession(newQuickAgentRequest("no skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !off.AgentRun.SkillsDisabled || len(off.AgentRun.AvailableSkills) != 0 {
+		t.Fatal("last detach must turn skills off")
+	}
+	if err := handleTerminalSkillCommand([]string{"auto"}); err != nil {
+		t.Fatal(err)
+	}
+	automatic, err := newTerminalAgentSession(newQuickAgentRequest("new goal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if automatic.AgentRun.ManualSkills || len(automatic.AgentRun.ActiveSkills) != 0 || len(automatic.AgentRun.AvailableSkills) != 2 {
+		t.Fatal("auto command did not enable automatic selection")
+	}
+	if err := automatic.activateAgentSkill("analysis"); err != nil {
+		t.Fatal(err)
+	}
+	sess.AgentRun.Status = agentWaitingContinue
+	resumeAgent(sess, "")
+	if !sess.AgentRun.ManualSkills || sess.AgentRun.ActiveSkills[0].Name != "report" {
+		t.Fatal("terminal detach changed an existing run")
+	}
+	if err := sess.activateAgentSkill("analysis"); err == nil {
+		t.Fatal("continuation widened manual selection")
+	}
+}
+
+func TestTerminalSkillCommandsValidateBeforeUpdating(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	previous := terminalSkillNames
+	previousAuto := terminalSkillsAuto
+	terminalSkillsAuto = false
+	terminalSkillNames = nil
+	t.Cleanup(func() { terminalSkillNames, terminalSkillsAuto = previous, previousAuto })
+	writeTestSkill(t, "report", "---\nname: report\ndescription: Report facts\n---\nUse facts.")
+	for i := 0; i < 2; i++ {
+		if err := handleTerminalSkillCommand([]string{"attach", "report"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{nil, {"attach"}, {"attach", "missing"}, {"detach", "missing"}, {"list", "extra"}, {"auto", "extra"}, {"off", "extra"}, {"other"}} {
+		if err := handleTerminalSkillCommand(args); err == nil {
+			t.Fatalf("expected error for %v", args)
+		}
+		if len(terminalSkillNames) != 1 || terminalSkillNames[0] != "report" {
+			t.Fatal("invalid command changed attached skills")
+		}
+	}
+	if !handleAgentCLICommand("/skills") || !handleAgentCLICommand("/skill list") {
+		t.Fatal("list commands were not handled")
+	}
+	if err := handleTerminalSkillCommand([]string{"detach"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(terminalSkillNames) != 0 {
+		t.Fatal("detach without a name must clear the selection")
+	}
+}
+
+func TestTerminalSkillsOffByDefaultAndModeSwitches(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	previous, previousAuto := terminalSkillNames, terminalSkillsAuto
+	terminalSkillNames, terminalSkillsAuto = nil, false
+	t.Cleanup(func() { terminalSkillNames, terminalSkillsAuto = previous, previousAuto })
+	path := writeTestSkill(t, "report", "invalid skill file")
+	sess, err := newTerminalAgentSession(newQuickAgentRequest("hello"))
+	if err != nil {
+		t.Fatalf("off mode should not read invalid installed skills: %v", err)
+	}
+	if !sess.AgentRun.SkillsDisabled || len(sess.AgentRun.ActiveSkills) != 0 || len(sess.AgentRun.AvailableSkills) != 0 {
+		t.Fatal("skills must be off by default")
+	}
+	if err := sess.activateAgentSkill("report"); err == nil {
+		t.Fatal("disabled run must reject skill activation")
+	}
+	messages, err := agentMessages(sess)
+	if err != nil || !strings.Contains(messages[0].Content, "Skills are disabled") {
+		t.Fatalf("disabled mode was not communicated: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: report\ndescription: Report facts\n---\nUse facts."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"/skill attach report", "/skill auto", "/skill attach report", "/skill off"} {
+		if !handleAgentCLICommand(command) {
+			t.Fatalf("command not handled: %s", command)
+		}
+		request := newQuickAgentRequest("next")
+		switch command {
+		case "/skill attach report":
+			if request.skillsDisabled || !request.attachedSkillsOnly || terminalSkillsAuto {
+				t.Fatal("attach must enable attached-only mode")
+			}
+		case "/skill auto":
+			if request.skillsDisabled || request.attachedSkillsOnly || len(request.Skills) != 0 {
+				t.Fatal("auto must clear attachments and enable automatic selection")
+			}
+		case "/skill off":
+			if !request.skillsDisabled || len(request.Skills) != 0 {
+				t.Fatal("off must clear attachments and disable skills")
+			}
+		}
+	}
+	resumeAgent(sess, "")
+	if !sess.AgentRun.SkillsDisabled || sess.activateAgentSkill("report") == nil {
+		t.Fatal("mode changes must not enable skills on an existing disabled run")
 	}
 }

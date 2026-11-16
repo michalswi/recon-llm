@@ -104,6 +104,8 @@ type AgentRun struct {
 	AttachmentNote      string          `json:"attachmentNote,omitempty"`
 	AvailableSkills     []SkillMetadata `json:"availableSkills,omitempty"`
 	ActiveSkills        []AgentSkill    `json:"activeSkills,omitempty"`
+	ManualSkills        bool            `json:"manualSkills,omitempty"`
+	SkillsDisabled      bool            `json:"skillsDisabled,omitempty"`
 }
 
 type AgentPlanStep struct {
@@ -418,7 +420,11 @@ func agentMessages(sess *agentSession) ([]ChatMessage, error) {
 		return nil, err
 	}
 	prompt += fmt.Sprintf("\n\nEXECUTION ENVIRONMENT:\nOS: %s\nWorking directory: %s\nWritable roots: %s\nCommands installed and allowed: %s\nAllowed but unavailable: %s\nCommands run with the same filesystem and network permissions as the recon process.", run.OperatingSystem, run.WorkingDirectory, emptyAgentValue(strings.Join(run.WritableRoots, ", ")), strings.Join(run.AvailableCommands, ", "), emptyAgentValue(strings.Join(run.UnavailableCommands, ", ")))
-	if len(run.AvailableSkills) > 0 {
+	if run.SkillsDisabled {
+		prompt += "\n\nSkills are disabled for this run. Do not select, load, or follow skills."
+	} else if run.ManualSkills {
+		prompt += "\n\nAutomatic skill selection is disabled for this run. Use only the already active, user-attached skills. Do not load other skills."
+	} else if len(run.AvailableSkills) > 0 {
 		catalog, _ := json.Marshal(run.AvailableSkills)
 		prompt += "\n\nAVAILABLE SKILLS (names and descriptions only):\n" + string(catalog) + "\nUse load_skill with an exact catalog name when its procedure is relevant. Do not reload an active skill."
 	}
