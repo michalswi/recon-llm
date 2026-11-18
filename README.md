@@ -173,11 +173,16 @@ Start the headless API on loopback:
 `RECON_API_ADDRESS=127.0.0.1:8080 ./recon` is equivalent. Create a run and inspect its status with:
 
 ```sh
+curl http://127.0.0.1:8080/api/health
+# {"status":"ok"}
+
 curl -sS -X POST http://127.0.0.1:8080/api/agent/runs \
-  -H 'Content-Type: application/json' \
-  -d '{"goal":"create main.go in /tmp/recon-test","writableRoots":["/tmp/recon-test"]}'
+-H 'Content-Type: application/json' \
+-d '{"goal":"Explain DNS"}'
 
 curl -sS http://127.0.0.1:8080/api/agent/runs/<run-id>
+
+curl -sS http://127.0.0.1:8080/api/agent/runs/<run-id> | jq '.finalAnswer'
 ```
 
 The API follows the same worker and critic lifecycle as the terminal:
@@ -201,6 +206,32 @@ Responses expose `iteration` (lifetime total), `segmentIteration` (current segme
 Finished runs (`completed`/`failed`/`cancelled`/`limit_reached`) leave the in-memory registry after the configured retention period. Active and waiting runs, and on-disk snapshots, are retained.
 
 The API is disabled by default, has no authentication, and can execute commands through the agent. Keep it on loopback or behind a trusted authenticated proxy.
+
+### Example: use a skill over the API
+
+This reuses the `ping-report` skill from [External Skills](#external-skills). Unlike terminal typed goals, API runs have no `/skill` mode: list the skill names in `skills` to activate them for that run. Omit `skills` and the agent may still pick one itself from the catalog, but that is the agent's decision and less reliable with small models.
+
+```sh
+# 1. Create a run with the skill already active
+curl -sS -X POST http://127.0.0.1:8080/api/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "goal": "Ping google.com five times and write a connectivity report from the actual output.",
+    "skills": ["ping-report"],
+    "expectedOutput": "Packets sent/received, loss %, min/avg/max RTT, plain-language interpretation.",
+    "constraints": "Run only the ping needed. No additional network checks."
+  }'
+
+# 2. Poll until status is waiting_approval (the verified report is in the response)
+curl -sS http://127.0.0.1:8080/api/agent/runs/<run-id>
+
+# 3. Accept the report
+curl -sS -X POST http://127.0.0.1:8080/api/agent/runs/<run-id>/approve
+```
+
+The creation response lists `activeSkills` (explicitly selected) and `availableSkills` (the loadable catalog), as names and descriptions only. The run's events show the agent running `ping -c 5 google.com`, followed by a candidate report based on that real output.
+
+An unknown or invalid skill name returns `400` with the reason, and runs are created even if other installed skills are invalid; skipped skills appear as `warning` events. If `OLLAMA_NUM_CTX` is set, a `warning` event also appears when active skills use at least 25% of it.
 
 ## Agent Guarantees
 
