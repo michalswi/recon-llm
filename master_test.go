@@ -24,6 +24,7 @@ type fakeMasterNode struct {
 	calls    []string
 	feedback string
 	hang     bool
+	goal     string
 }
 
 func (f *fakeMasterNode) called(call string) bool {
@@ -57,6 +58,9 @@ func (f *fakeMasterNode) ServeHTTP(response http.ResponseWriter, request *http.R
 	case request.URL.Path == "/api/health":
 		writeAgentAPIJSON(response, http.StatusOK, map[string]string{"status": "ok"})
 	case request.Method == http.MethodPost && request.URL.Path == "/api/agent/runs":
+		var created AgentRequest
+		_ = json.NewDecoder(request.Body).Decode(&created)
+		f.goal = created.Goal
 		f.status = agentRunning
 		writeAgentAPIJSON(response, http.StatusAccepted, run())
 	case request.Method == http.MethodGet && request.URL.Path == "/api/agent/runs/run_1":

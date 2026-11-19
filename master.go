@@ -501,6 +501,9 @@ func printMasterHelp() {
 	fmt.Println("                     dispatches them to nodes, reviews the results and merges one answer")
 	fmt.Println("  /broadcast GOAL    Send the same goal to every node, without an orchestrator model")
 	fmt.Println("  /nodes             Check which nodes are reachable (and that the token is accepted)")
+	fmt.Println("  /attach PATH       Read a file (or a directory's files) and send its contents to nodes with each goal")
+	fmt.Println("  /attached          List attached files")
+	fmt.Println("  /detach [PATH|NAME] Remove one attached file, or all")
 	fmt.Println("  /verbose           Toggle full node activity: command output, plans, critic feedback")
 	fmt.Println("  /m                 Show the orchestrator model")
 	fmt.Println("  /h, /help          Show this help")
@@ -585,6 +588,9 @@ func runMaster(list string) error {
 		case "/m":
 			fmt.Println(info("Model: " + modelName))
 			continue
+		case "/attached":
+			handleMasterAttachCommand(line)
+			continue
 		case "/verbose":
 			masterVerbose = !masterVerbose
 			if masterVerbose {
@@ -598,6 +604,13 @@ func runMaster(list string) error {
 			printMasterNodes(checkContext, nodes, os.Stdout)
 			cancel()
 			continue
+		}
+		if fields := strings.Fields(line); len(fields) > 0 {
+			switch strings.ToLower(fields[0]) {
+			case "/attach", "/detach", "/deattach":
+				handleMasterAttachCommand(line)
+				continue
+			}
 		}
 		broadcast := false
 		if fields := strings.Fields(line); strings.EqualFold(fields[0], "/broadcast") {
@@ -624,7 +637,15 @@ func runMaster(list string) error {
 			}
 		}
 		if broadcast {
-			err = runMasterGoal(signalContext, reader, nodes, line, os.Stdout)
+			sent := line
+			if block, truncated := masterAttachmentBlock(masterAttachments); block != "" {
+				sent += block
+				fmt.Println(info("Sending file contents with the goal:\n" + masterAttachmentsSummary(masterAttachments)))
+				if truncated {
+					fmt.Println(warn("Some content was truncated to fit the 64 KiB limit."))
+				}
+			}
+			err = runMasterGoal(signalContext, reader, nodes, sent, os.Stdout)
 		} else {
 			err = orchestrateMaster(signalContext, reader, nodes, line, os.Stdout)
 		}
