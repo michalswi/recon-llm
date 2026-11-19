@@ -20,6 +20,9 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `fileextract.go`: local document and packet-capture extraction utilities.
 - `procgroup_unix.go`/`procgroup_other.go`: background-job process-group start/kill, platform-specific.
 - `vars.go`: version, built-in prompt, environment configuration, and process state.
+- `master.go`: opt-in `-master` mode: node client for the recon API, `/broadcast` fan-out with per-node approval, terminal loop, and bearer-token/redirect/output-sanitizing safeguards.
+- `master_attach.go`: master-side `/attach`, `/attached` and `/detach`; files are read on the master and sent as text in the API's `fileContents` field under recon's inline limits (64 KiB for a single file, 1 KiB per directory file, 64 KiB per goal).
+- `master_orchestrator.go` and `prompts/master.txt`: the master's LLM orchestrator (strict actions `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification`, `answer`), its run registry, master critic, user dispatch approval, and cleanup.
 - `prompts/agent.txt`: strict agent action protocol embedded at build time.
 - `prompts/*.txt`: base prompts embedded at build time.
 
@@ -38,6 +41,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 | `SYSTEM_PROMPT` | unset | Optional path to the initial base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 | `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes after a run reaches a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) before it is evicted from the in-memory API run registry; `0` disables eviction. The on-disk snapshot remains the audit record either way |
+| `RECON_API_TOKEN` | unset | When set, the API requires `Authorization: Bearer <token>` on every endpoint (constant-time comparison). In master mode the same variable is sent to every node |
 
 All Ollama requests go through a shared HTTP client (`ollamaHTTPClient` in [runtime.go](runtime.go)). If `OLLAMA_URL` uses plain HTTP to a non-loopback host, a startup warning is printed since prompts and responses would cross the network unencrypted and readable/alterable by a network attacker; use `https://` (optionally with `OLLAMA_CA_CERT`) or an encrypted tunnel instead.
 
@@ -76,7 +80,7 @@ Terminal run snapshots are persisted under `~/.recon/agent_runs/<run-id>.json`. 
 
 The API is enabled with `-api-address <address>` or `RECON_API_ADDRESS`; it is disabled by default and replaces the interactive terminal loop for that process. It reuses the terminal session constructor and worker rather than implementing a separate agent engine.
 
-- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object. Optional `writableRoots` entries must name existing directories; they authorize native `write_file` actions beneath those roots for that run.
+- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object. Optional `fileContents` entries (`name`, `size`, `content`, `truncated`, `note`; see `agent_filecontent.go`) carry file text read by the caller, e.g. a master instance; they are validated (30 files shared with attachments, 64 KiB of text per file and in total, plain names, UTF-8) and stored in `AttachmentNote` like local attachments, never in the objective, so keyword heuristics on the goal (`goalRequiresCodeDeliverable`, `requiredGoalCommand`) cannot be triggered by file text. Optional `writableRoots` entries must name existing directories; they authorize native `write_file` actions beneath those roots for that run.
 - `GET /api/agent/runs/{id}` returns sanitized run state, events, plans, and candidate output.
 - `POST /api/agent/runs/{id}/feedback` resumes clarification or revises a candidate.
 - `POST /api/agent/runs/{id}/approve` accepts a verified candidate.
@@ -85,7 +89,7 @@ The API is enabled with `-api-address <address>` or `RECON_API_ADDRESS`; it is d
 
 API responses and persisted snapshots expose lifetime `iteration`, current `segmentIteration`, and per-segment `maxIterations`. The `waiting_continue` state is nonterminal and is not subject to retention eviction.
 
-The in-memory API registry is process-local. Persisted snapshots remain audit records and are not loaded after restart. The API has no authentication and must remain loopback-bound or be protected by a trusted authenticated proxy. Runs that reach a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) are evicted from the registry after `RECON_API_RUN_RETENTION_MINUTES` (default 30, `0` disables eviction); active and waiting runs are never evicted. Eviction is swept opportunistically on `POST /api/agent/runs` and `GET|POST /api/agent/runs/{id}...`, not via a background timer.
+The in-memory API registry is process-local. Persisted snapshots remain audit records and are not loaded after restart. The API has no authentication unless `RECON_API_TOKEN` is set, and must remain loopback-bound or be protected by a trusted authenticated proxy or the bearer token over an encrypted transport; binding beyond loopback without a token prints a startup warning. Runs that reach a terminal status (`completed`/`failed`/`cancelled`/`limit_reached`) are evicted from the registry after `RECON_API_RUN_RETENTION_MINUTES` (default 30, `0` disables eviction); active and waiting runs are never evicted. Eviction is swept opportunistically on `POST /api/agent/runs` and `GET|POST /api/agent/runs/{id}...`, not via a background timer.
 
 ## Agent Actions
 
@@ -148,13 +152,13 @@ Install only trusted skills without secrets: active instructions are sent to Oll
 
 The nominal command allowlist is defined in `comm.go`. Agent commands are validated before execution, but execution is not sandboxed and uses the operating-system permissions of the recon process. Background commands use `bash -c`; run cleanup cancels jobs owned by that run.
 
-Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination.
+Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination. Master mode (`-master`) is the one explicit coordinator: its orchestrator only dispatches subtasks to nodes through their public API, asks the user to approve every dispatch, and does not deduplicate or split work beyond what its model decides.
 
 New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `agent.txt` — don't restate or override it. Deliver requested files with `write_file`, never shell redirection or heredocs. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
 
 ## Product Invariants
 
-- The application is agent-only, with terminal and opt-in headless API interfaces.
+- The application is agent-only, with terminal and opt-in headless API interfaces, plus an opt-in master mode (`-master`) that is a client of the API with its own small orchestrator loop (it does not reuse the agent worker, its command allowlist or its file tools) rather than a second agent engine; recon is never a master by default.
 - Preserve the worker-owned loop, planning, critic, retries, context compaction, evidence, jobs, attachments, clarification, revision, approval, cancellation, and limits.
 - Keep agent actions strict and machine-readable.
 - Keep bundled prompts embedded so the binary remains standalone.

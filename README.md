@@ -53,6 +53,7 @@ On macOS and Linux, interactive prompts support left/right arrows, backspace, an
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 | `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes to retain finished API runs in memory; `0` disables eviction |
+| `RECON_API_TOKEN` | unset | API: require `Authorization: Bearer <token>` on every request. Master mode (`-master`): token sent to every node |
 
 Plain HTTP to a non-loopback host triggers a startup warning: prompts and responses travel unencrypted. Use HTTPS (with `OLLAMA_CA_CERT` for a private CA) or an encrypted tunnel.
 
@@ -199,13 +200,15 @@ The API follows the same worker and critic lifecycle as the terminal:
 
 Run responses include `sessionId`, identifying the snapshot at `~/.recon/agent_runs/<sessionId>.json`.
 
+Optional `fileContents` is a list of `{"name":"a.txt","size":123,"content":"...","truncated":false,"note":""}` for files the caller read itself, such as a master instance whose files the node cannot access. The node stores them like local attachments (shown to the agent and critic under `ATTACHMENTS`, never part of the objective) with the same limits as local attachments: at most 30 files in total with attachments, 64 KiB of text per file and in total, names must be plain file names, content UTF-8 text. They are saved in the node's run snapshot. Invalid values return `400`.
+
 Optional `writableRoots` entries must be existing directories. They authorize native `write_file` actions beneath those roots, limited to 256 KiB per file, 50 files and 1 MiB per run. Files may contain multiline text; symlink escapes are rejected, and overwriting requires explicit permission. **File creation does not authorize building, testing, or running generated code.**
 
 Responses expose `iteration` (lifetime total), `segmentIteration` (current segment), and `maxIterations` (segment limit). At `waiting_continue`, only `/continue` or `/cancel` applies; `/feedback` is for clarification and revision. Terminal `limit_reached` runs cannot resume.
 
 Finished runs (`completed`/`failed`/`cancelled`/`limit_reached`) leave the in-memory registry after the configured retention period. Active and waiting runs, and on-disk snapshots, are retained.
 
-The API is disabled by default, has no authentication, and can execute commands through the agent. Keep it on loopback or behind a trusted authenticated proxy.
+The API is disabled by default and can execute commands through the agent. Without `RECON_API_TOKEN` it has no authentication: keep it on loopback or behind a trusted authenticated proxy (binding beyond loopback without a token prints a warning). With `RECON_API_TOKEN` set, every request, including `/api/health`, must send `Authorization: Bearer <token>`; use HTTPS or an encrypted tunnel so the token and results are not exposed on the network.
 
 ### Example: use a skill over the API
 
@@ -232,6 +235,101 @@ curl -sS -X POST http://127.0.0.1:8080/api/agent/runs/<run-id>/approve
 The creation response lists `activeSkills` (explicitly selected) and `availableSkills` (the loadable catalog), as names and descriptions only. The run's events show the agent running `ping -c 5 google.com`, followed by a candidate report based on that real output.
 
 An unknown or invalid skill name returns `400` with the reason, and runs are created even if other installed skills are invalid; skipped skills appear as `warning` events. If `OLLAMA_NUM_CTX` is set, a `warning` event also appears when active skills use at least 25% of it.
+
+## Master Mode
+
+By default recon is a standalone agent. Start it with `-master` and a comma-separated list of recon API URLs to make it a **master** that drives many instances at once:
+
+```sh
+# on each worker host (they run the agent and talk to their own Ollama)
+RECON_API_TOKEN=<token> ./recon -api-address 0.0.0.0:8080
+
+# on the master (OLLAMA_* configures the orchestrator's own model, not the nodes')
+OLLAMA_URL=http://localhost:11434/api/chat OLLAMA_MODEL=<capable-model> \
+RECON_API_TOKEN=<token> ./recon -master http://10.0.0.5:8080,https://recon.example.com/node2
+```
+
+Without a token (trusted network only, e.g. a lab, or loopback with SSH tunnels), omit `RECON_API_TOKEN` on both sides:
+
+```sh
+# on each worker host: bind to loopback and reach it through an SSH tunnel
+./recon -api-address 127.0.0.1:8080
+
+# on the master, with tunnels such as: ssh -N -L 8081:127.0.0.1:8080 user@host1
+OLLAMA_MODEL=<capable-model> ./recon -master http://127.0.0.1:8081,http://127.0.0.1:8082
+```
+
+A node bound beyond loopback without a token (e.g. `0.0.0.0:8080`) prints a warning: anyone who can reach the port can make it run commands.
+
+**Two ways to use the master**
+
+| | Plain objective (orchestrator) | `/broadcast GOAL` |
+|---|---|---|
+| **What happens** | The master's LLM splits the objective, picks nodes, reviews results and merges one answer | The same goal goes to every node, unchanged |
+| **Master needs Ollama** | Yes (`OLLAMA_URL`, `OLLAMA_MODEL` on the master) | No |
+| **Who decides the work** | The orchestrator model, with your approval of each dispatch | You |
+| **Result** | One merged, critic-checked answer | Each node's own answer, plus a summary table |
+| **Use it for** | Different tasks per node, or combining results | The same check from several hosts, or comparing nodes |
+
+> **Important:** only `/broadcast GOAL` guarantees that nodes do the work. If you type just `GOAL`, the master's LLM decides: it may dispatch to one or more nodes (asking you first), or **answer by itself without contacting any node**, for example for a general-knowledge question such as "who is god?". To make sure every node is asked, use `/broadcast`, or say so explicitly in the objective ("ask every node: ...").
+
+
+The master uses its own Ollama model (`OLLAMA_URL`, `OLLAMA_MODEL`, ... read from the master's environment, default `localhost:11434`) as the **orchestrator**; each node uses the Ollama configured in its own environment. A running Ollama is required on the master for objectives, but not for `/broadcast`; if it is unreachable, the master says so immediately instead of retrying. `-master` cannot be combined with `-api-address`. Nodes are numbered `n1`, `n2`, ... in the order given.
+
+**Orchestrator (default).** A typed objective is handled by an LLM orchestrator that works through six strict JSON actions: `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification` and `answer`.
+
+- **Splitting:** it breaks the objective into self-contained subtasks and dispatches each to a chosen node as a normal API run (`POST /api/agent/runs`). Each node uses its own model, worker, critic, skills, allowlist and limits. A node sees only the goal it is sent, not the objective or other nodes' results.
+- **Waiting:** `check_run` waits for a run to leave `running` without extra model calls and relays the node's commands, warnings and errors live.
+- **Review:** it accepts a node's verified candidate, sends specific feedback (also used to answer a node's clarification), continues a paused run, or cancels it.
+- **Merge:** it returns one answer. An independent master critic checks that every claim is supported by the node results shown and that failed or unreachable runs are reported; you then accept, revise or stop, as in the terminal.
+- **Your approval:** every dispatch is shown and needs your `y`/`n`, or `a` to allow all dispatches for the current objective. Declined dispatches are never sent. The orchestrator may also ask you clarifying questions.
+- **Cleanup:** runs that are not accepted are cancelled when the orchestration ends, on Ctrl+C or SIGTERM, and on errors.
+- **Limits:** at most 16 runs per objective, `RECON_MAX_ITERATIONS` model steps per segment (then continue [c] or stop [s]), and three consecutive invalid model responses end the orchestration.
+
+**Broadcast.** `/broadcast GOAL` skips the orchestrator and sends the same goal to every node. Candidate approval, clarification and continuation are asked per node, and a summary table plus every accepted answer is printed. It works even if the master's Ollama is unreachable.
+
+Other commands: `/attach`, `/attached` and `/detach` manage attached files (see below), `/nodes` checks reachability and that the token is accepted, `/verbose` toggles full node activity (see below), `/m` shows the orchestrator model, `/h` shows help and `/q` exits. Ctrl+C cancels the active runs on all nodes. An unreachable node or one that rejects a run never stops the others.
+
+### Watching what nodes do
+
+By default the master prints each node's commands, failed commands (with the first line of the error), warnings and errors, so a stuck node shows its failing command instead of silence. `/verbose` toggles the full view: command output, plans, clarifications, critic feedback and rejected candidates. The toggle lasts for the master session and applies to both orchestrator runs and `/broadcast`.
+
+For the complete history, including model errors, read the node's own run: `curl -s http://<node>/api/agent/runs/<run-id>` (add the bearer token if set) or the snapshot `~/.recon/agent_runs/<run-id>.json` on the node host. Run IDs are printed when a run starts.
+
+### Attaching files in master mode
+
+Nodes cannot read the master's disk, so the master reads attached files itself and sends their **text** to the nodes in the run request's `fileContents` field (see [Agent API](#agent-api)). The text is stored on the node like a local attachment, not mixed into the goal, so words inside a file cannot change how the node interprets your goal.
+
+```
+[goal]: /attach /home/me/notes.txt
+[goal]: /broadcast summarize the attached file
+```
+
+- **Commands:** `/attach PATH` (a file, or a directory's regular files), `/attached` and `/detach [PATH|NAME]`, as in the terminal. Attachments last for the master session and apply to both `/broadcast` and orchestrator objectives. The file is read when attached; re-attach to refresh it.
+- **Same limits as recon:** up to 20 MiB per file is read (PDF, DOCX, PPTX, DOC, PCAP/PCAPNG/CAP and plain text are extracted). A file attached directly sends up to **64 KiB** of its text, a file from an attached directory only **1 KiB**, and one goal carries at most **64 KiB** in total, at most 30 files. `/attach` and `/attached` show how much of each file is sent. A file with no extractable text stays listed with a note.
+- **One difference from recon:** recon keeps the path so its agent can read the rest of a file with tools. A node cannot do that with the master's file, so anything beyond the limits is simply unavailable to it. Split large files, or put the file on the node and name its path in the goal.
+- **Images** are not supported in master mode, because nodes only receive text from the master.
+- **`/broadcast`** sends the contents of all attached files to every node and prints which files go out.
+- **Plain objective (orchestrator):** the orchestrator sees only the file names, sizes and short excerpts, but **every dispatch automatically includes all attached files** in `fileContents`, so the model cannot forget to send them. It can list names in `dispatch_run`'s `files` field to send only some, or `"files":[]` to send none. Your approval prompt for each dispatch lists the files being sent. Whether and where a task is dispatched is still the model's decision, so use `/broadcast` when every node must do the work.
+- **Privacy:** contents leave the master for the nodes and their models. Do not attach secrets. File content is marked as data, not instructions, but nodes' models can still be influenced by it.
+
+### Prompts and skills in master mode
+
+The master does not push prompts or skills to nodes; each node uses what is configured on its own host.
+
+| | Master | Nodes |
+|---|---|---|
+| **Base prompt** | `SYSTEM_PROMPT` has no effect on the orchestrator, which always uses the embedded `prompts/master.txt` protocol | Chosen when the node process starts (`SYSTEM_PROMPT`, otherwise the built-in default). The API has no per-run prompt field, so the master cannot change it |
+| **Skills** | Not used by the master itself, and it cannot list or attach a node's skills | Read from the node's own `~/.recon/skills/`. Runs started by the master do not select skills explicitly, so each node's agent may pick one automatically |
+
+Consequences:
+- To give a node a role, start it with its prompt, e.g. `SYSTEM_PROMPT=/path/pentester.txt ./recon -api-address 127.0.0.1:8080`, and install any skills on that host.
+- Automatic selection is the agent's decision and is unreliable with small models. A node may answer with a skill name instead of a valid action (e.g. `{"action":"ping-report"}`) and burn its iterations. Prefer explicit goals ("run `ping -c 5 google.com` and report ...") and a capable model on the nodes, or remove skills from nodes that should not use them.
+- To run a skill explicitly, call that node's API directly with `"skills":["name"]` (see [Example: use a skill over the API](#example-use-a-skill-over-the-api)) instead of going through the master.
+
+Explicit per-run skills and prompts from the master would need new request fields and are not implemented.
+
+**Security:** the master can make every node execute commands, and the orchestrator's goals are written by a model. Always set `RECON_API_TOKEN` (the same value on all nodes; it is sent as a bearer token) and use `https://` through a trusted reverse proxy or an encrypted tunnel for non-loopback nodes; the master warns about plain HTTP. Redirects are never followed, node output is treated as untrusted data in the orchestrator prompt, and control characters in it are stripped before display. Dispatched runs have no writable roots or explicit skills (nodes may pick skills automatically), and no native attachments: attached files travel only as text in `fileContents`, and nodes must run a version that supports it (older nodes reject the unknown field with `400`). The master does not deduplicate work: do not point several nodes at the same target or attachment path without external coordination. The orchestration transcript is not persisted by the master; each node keeps its own run snapshots. Small models struggle with this protocol, so use a capable model for the orchestrator.
 
 ## Agent Guarantees
 

@@ -31,6 +31,9 @@ type AgentRequest struct {
 	FilePaths          []string `json:"filePaths,omitempty"`
 	WritableRoots      []string `json:"writableRoots,omitempty"`
 	Skills             []string `json:"skills,omitempty"`
+	// FileContents carries file text read by the caller (e.g. a master instance),
+	// for files this process cannot access. See agent_filecontent.go.
+	FileContents       []AgentFileContent `json:"fileContents,omitempty"`
 	attachedSkillsOnly bool
 	skillsDisabled     bool
 }
@@ -62,7 +65,20 @@ func main() {
 	checkOllamaPSFlag := flag.Bool("check-ollama-ps", false, "show models currently loaded in Ollama (/api/ps), then exit")
 	checkOllamaModelsFlag := flag.Bool("check-ollama-models", false, "show models available in Ollama (/api/tags), then exit")
 	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
+	masterFlag := flag.String("master", "", "run as master: comma-separated recon API URLs to orchestrate (e.g. http://a:8080,http://b:8080)")
 	flag.Parse()
+
+	if strings.TrimSpace(*masterFlag) != "" {
+		if strings.TrimSpace(*apiAddressFlag) != "" {
+			fmt.Println(warn("-master cannot be combined with -api-address (or RECON_API_ADDRESS)."))
+			os.Exit(2)
+		}
+		if err := runMaster(*masterFlag); err != nil {
+			fmt.Println(warn("Master failed:"), err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	warnIfInsecureOllamaURL(ollamaURL)
 	warnIfInsecureOllamaTLS()
@@ -538,6 +554,12 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 			}
 		}
 	}
+
+	if err := validateAgentFileContents(request.FileContents, len(resolvedAttachments)); err != nil {
+		return nil, err
+	}
+	fileContentNote, _ := agentFileContentNote(request.FileContents, attachmentTextRemaining)
+	attachmentNote.WriteString(fileContentNote)
 
 	if _, err := composeAgentPrompt(systemPrompt, goalDescription, "No previous attempts yet."); err != nil {
 		return nil, fmt.Errorf("load agent prompt: %w", err)
