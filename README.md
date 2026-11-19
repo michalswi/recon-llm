@@ -259,6 +259,19 @@ OLLAMA_MODEL=<capable-model> ./recon -master http://127.0.0.1:8081,http://127.0.
 
 A node bound beyond loopback without a token (e.g. `0.0.0.0:8080`) prints a warning: anyone who can reach the port can make it run commands.
 
+**Two ways to use the master**
+
+| | Plain objective (orchestrator) | `/broadcast GOAL` |
+|---|---|---|
+| **What happens** | The master's LLM splits the objective, picks nodes, reviews results and merges one answer | The same goal goes to every node, unchanged |
+| **Master needs Ollama** | Yes (`OLLAMA_URL`, `OLLAMA_MODEL` on the master) | No |
+| **Who decides the work** | The orchestrator model, with your approval of each dispatch | You |
+| **Result** | One merged, critic-checked answer | Each node's own answer, plus a summary table |
+| **Use it for** | Different tasks per node, or combining results | The same check from several hosts, or comparing nodes |
+
+> **Important:** only `/broadcast GOAL` guarantees that nodes do the work. If you type just `GOAL`, the master's LLM decides: it may dispatch to one or more nodes (asking you first), or **answer by itself without contacting any node**, for example for a general-knowledge question such as "who is god?". To make sure every node is asked, use `/broadcast`, or say so explicitly in the objective ("ask every node: ...").
+
+
 The master uses its own Ollama model (`OLLAMA_URL`, `OLLAMA_MODEL`, ... read from the master's environment, default `localhost:11434`) as the **orchestrator**; each node uses the Ollama configured in its own environment. A running Ollama is required on the master for objectives, but not for `/broadcast`; if it is unreachable, the master says so immediately instead of retrying. `-master` cannot be combined with `-api-address`. Nodes are numbered `n1`, `n2`, ... in the order given.
 
 **Orchestrator (default).** A typed objective is handled by an LLM orchestrator that works through six strict JSON actions: `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification` and `answer`.
