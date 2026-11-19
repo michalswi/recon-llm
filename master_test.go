@@ -217,3 +217,38 @@ func TestMasterCancelsRemoteRunsOnInterrupt(t *testing.T) {
 		t.Fatalf("interrupt must cancel remote runs: %v", fake.calls)
 	}
 }
+
+func TestMasterPrintNewEventsVerbosity(t *testing.T) {
+	previous := masterVerbose
+	t.Cleanup(func() { masterVerbose = previous })
+	events := []AgentEvent{
+		{Kind: "action", Action: "run_command", Command: "ping -c 5 host"},
+		{Kind: "observation", Action: "run_command", Output: "ping: cannot resolve host\nsecond line", Success: false},
+		{Kind: "observation", Action: "run_command", Output: "5 packets transmitted", Success: true},
+		{Kind: "plan", Text: "1. ping"},
+		{Kind: "verification", Text: "missing RTT"},
+	}
+	render := func(verbose bool) string {
+		masterVerbose = verbose
+		node := &masterNode{label: "n"}
+		node.run.Events = events
+		var out bytes.Buffer
+		node.printNewEvents(&out)
+		return out.String()
+	}
+	quiet := render(false)
+	if !strings.Contains(quiet, "ping -c 5 host") || !strings.Contains(quiet, "cannot resolve host") {
+		t.Fatalf("default view must show the command and its failure:\n%s", quiet)
+	}
+	for _, hidden := range []string{"5 packets transmitted", "1. ping", "missing RTT", "second line"} {
+		if strings.Contains(quiet, hidden) {
+			t.Fatalf("default view must not show %q:\n%s", hidden, quiet)
+		}
+	}
+	verbose := render(true)
+	for _, want := range []string{"5 packets transmitted", "second line", "1. ping", "missing RTT"} {
+		if !strings.Contains(verbose, want) {
+			t.Fatalf("verbose view missing %q:\n%s", want, verbose)
+		}
+	}
+}

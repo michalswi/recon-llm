@@ -204,18 +204,64 @@ func (n *masterNode) act(ctx context.Context, suffix string, in any) {
 	n.update(run)
 }
 
+// masterVerbose shows every node event (command output, plans, critic feedback,
+// candidates). By default only commands, failed commands, warnings and errors are
+// printed. It is read and written from the master's terminal goroutine only.
+var masterVerbose bool
+
+const masterOutputDisplayLimit = 1500
+
+func masterFirstLine(text string) string {
+	text = strings.TrimSpace(sanitizeRemoteText(text))
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		return text[:i] + " ..."
+	}
+	return text
+}
+
 func (n *masterNode) printNewEvents(out io.Writer) {
+	tag := "[" + n.label + "] "
 	for ; n.shown < len(n.run.Events); n.shown++ {
 		event := n.run.Events[n.shown]
 		switch event.Kind {
 		case "action":
 			if event.Command != "" {
-				fmt.Fprintf(out, "%s [%s] %s\n", runningLabel(), n.label, sanitizeRemoteText(event.Command))
+				fmt.Fprintf(out, "%s %s%s\n", runningLabel(), tag, sanitizeRemoteText(event.Command))
+			} else if masterVerbose {
+				fmt.Fprintf(out, "%s%s %s\n", info(tag+"action:"), event.Action, truncateMasterText(masterFirstLine(event.Text), 200))
+			}
+		case "observation":
+			text := event.Output
+			if text == "" {
+				text = event.Text
+			}
+			switch {
+			case masterVerbose && text != "":
+				fmt.Fprintln(out, outputLabel(), tag+event.Action)
+				fmt.Fprintln(out, truncateMasterText(strings.TrimSpace(sanitizeRemoteText(text)), masterOutputDisplayLimit))
+			case !event.Success && text != "":
+				fmt.Fprintln(out, warn(tag+event.Action+" failed:"), truncateMasterText(masterFirstLine(text), 300))
+			}
+		case "plan":
+			if masterVerbose {
+				fmt.Fprintln(out, accent(tag+"plan:"), truncateMasterText(strings.TrimSpace(sanitizeRemoteText(event.Text)), masterOutputDisplayLimit))
+			}
+		case "verification":
+			if masterVerbose {
+				fmt.Fprintln(out, info(tag+"critic requested revision:"), truncateMasterText(masterFirstLine(event.Text), 500))
+			}
+		case "candidate":
+			if masterVerbose {
+				fmt.Fprintln(out, info(tag+"rejected candidate:"), truncateMasterText(masterFirstLine(event.Text), 300))
+			}
+		case "clarification":
+			if masterVerbose {
+				fmt.Fprintln(out, accent(tag+"clarification:"), truncateMasterText(masterFirstLine(event.Text), 500))
 			}
 		case "warning":
-			fmt.Fprintln(out, warn("["+n.label+"] Warning: "+sanitizeRemoteText(event.Text)))
+			fmt.Fprintln(out, warn(tag+"Warning: "+sanitizeRemoteText(event.Text)))
 		case "error", "invalid_action":
-			fmt.Fprintln(out, warn("["+n.label+"] Agent error:"), formatAgentDisplayText(sanitizeRemoteText(event.Text)))
+			fmt.Fprintln(out, warn(tag+"Agent error:"), formatAgentDisplayText(sanitizeRemoteText(event.Text)))
 		}
 	}
 }
@@ -455,6 +501,7 @@ func printMasterHelp() {
 	fmt.Println("                     dispatches them to nodes, reviews the results and merges one answer")
 	fmt.Println("  /broadcast GOAL    Send the same goal to every node, without an orchestrator model")
 	fmt.Println("  /nodes             Check which nodes are reachable (and that the token is accepted)")
+	fmt.Println("  /verbose           Toggle full node activity: command output, plans, critic feedback")
 	fmt.Println("  /m                 Show the orchestrator model")
 	fmt.Println("  /h, /help          Show this help")
 	fmt.Println("  /q                 Exit; Ctrl+C cancels the active runs on all nodes")
@@ -537,6 +584,14 @@ func runMaster(list string) error {
 			continue
 		case "/m":
 			fmt.Println(info("Model: " + modelName))
+			continue
+		case "/verbose":
+			masterVerbose = !masterVerbose
+			if masterVerbose {
+				fmt.Println(info("Verbose on: showing command output, plans and critic feedback from nodes."))
+			} else {
+				fmt.Println(info("Verbose off: showing commands, failed commands, warnings and errors."))
+			}
 			continue
 		case "/nodes":
 			checkContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)

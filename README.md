@@ -273,7 +273,13 @@ The master uses its own Ollama model (`OLLAMA_URL`, `OLLAMA_MODEL`, ... read fro
 
 **Broadcast.** `/broadcast GOAL` skips the orchestrator and sends the same goal to every node. Candidate approval, clarification and continuation are asked per node, and a summary table plus every accepted answer is printed. It works even if the master's Ollama is unreachable.
 
-Other commands: `/nodes` checks reachability and that the token is accepted, `/m` shows the orchestrator model, `/h` shows help and `/q` exits. Ctrl+C cancels the active runs on all nodes. An unreachable node or one that rejects a run never stops the others.
+Other commands: `/nodes` checks reachability and that the token is accepted, `/verbose` toggles full node activity (see below), `/m` shows the orchestrator model, `/h` shows help and `/q` exits. Ctrl+C cancels the active runs on all nodes. An unreachable node or one that rejects a run never stops the others.
+
+### Watching what nodes do
+
+By default the master prints each node's commands, failed commands (with the first line of the error), warnings and errors, so a stuck node shows its failing command instead of silence. `/verbose` toggles the full view: command output, plans, clarifications, critic feedback and rejected candidates. The toggle lasts for the master session and applies to both orchestrator runs and `/broadcast`.
+
+For the complete history, including model errors, read the node's own run: `curl -s http://<node>/api/agent/runs/<run-id>` (add the bearer token if set) or the snapshot `~/.recon/agent_runs/<run-id>.json` on the node host. Run IDs are printed when a run starts.
 
 ### Prompts and skills in master mode
 
