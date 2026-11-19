@@ -20,7 +20,8 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `fileextract.go`: local document and packet-capture extraction utilities.
 - `procgroup_unix.go`/`procgroup_other.go`: background-job process-group start/kill, platform-specific.
 - `vars.go`: version, built-in prompt, environment configuration, and process state.
-- `master.go`: opt-in `-master` mode that fans an objective out to remote recon API instances, relays approval decisions, and aggregates results.
+- `master.go`: opt-in `-master` mode: node client for the recon API, `/broadcast` fan-out with per-node approval, terminal loop, and bearer-token/redirect/output-sanitizing safeguards.
+- `master_orchestrator.go` and `prompts/master.txt`: the master's LLM orchestrator (strict actions `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification`, `answer`), its run registry, master critic, user dispatch approval, and cleanup.
 - `prompts/agent.txt`: strict agent action protocol embedded at build time.
 - `prompts/*.txt`: base prompts embedded at build time.
 
@@ -150,13 +151,13 @@ Install only trusted skills without secrets: active instructions are sent to Oll
 
 The nominal command allowlist is defined in `comm.go`. Agent commands are validated before execution, but execution is not sandboxed and uses the operating-system permissions of the recon process. Background commands use `bash -c`; run cleanup cancels jobs owned by that run.
 
-Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination. Master mode (`-master`) is the one explicit coordinator: it only dispatches the same objective to nodes through their public API and does not deduplicate or split work between them.
+Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination. Master mode (`-master`) is the one explicit coordinator: its orchestrator only dispatches subtasks to nodes through their public API, asks the user to approve every dispatch, and does not deduplicate or split work beyond what its model decides.
 
 New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `agent.txt` — don't restate or override it. Deliver requested files with `write_file`, never shell redirection or heredocs. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
 
 ## Product Invariants
 
-- The application is agent-only, with terminal and opt-in headless API interfaces, plus an opt-in master mode (`-master`) that is a client of the API rather than a second agent engine; recon is never a master by default.
+- The application is agent-only, with terminal and opt-in headless API interfaces, plus an opt-in master mode (`-master`) that is a client of the API with its own small orchestrator loop (it does not reuse the agent worker, its command allowlist or its file tools) rather than a second agent engine; recon is never a master by default.
 - Preserve the worker-owned loop, planning, critic, retries, context compaction, evidence, jobs, attachments, clarification, revision, approval, cancellation, and limits.
 - Keep agent actions strict and machine-readable.
 - Keep bundled prompts embedded so the binary remains standalone.

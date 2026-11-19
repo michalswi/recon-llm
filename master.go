@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"text/tabwriter"
 	"time"
 )
@@ -450,11 +451,15 @@ func printMasterNodes(ctx context.Context, nodes []*masterNode, out io.Writer) {
 
 func printMasterHelp() {
 	fmt.Println(accent("Master commands:"))
-	fmt.Println("  <objective>  Send the objective to every node and aggregate the results")
-	fmt.Println("  /nodes       Check which nodes are reachable (and that the token is accepted)")
-	fmt.Println("  /h, /help    Show this help")
-	fmt.Println("  /q           Exit; Ctrl+C cancels the active runs on all nodes")
-	fmt.Println("Each node runs its own worker, critic and limits; candidates are shown for your approval.")
+	fmt.Println("  <objective>        The orchestrator (this instance's Ollama model) splits it into subtasks,")
+	fmt.Println("                     dispatches them to nodes, reviews the results and merges one answer")
+	fmt.Println("  /broadcast GOAL    Send the same goal to every node, without an orchestrator model")
+	fmt.Println("  /nodes             Check which nodes are reachable (and that the token is accepted)")
+	fmt.Println("  /m                 Show the orchestrator model")
+	fmt.Println("  /h, /help          Show this help")
+	fmt.Println("  /q                 Exit; Ctrl+C cancels the active runs on all nodes")
+	fmt.Println("Each node runs its own worker, critic and limits. Every dispatch needs your approval")
+	fmt.Println("(or [a] for all of the current objective), and the merged answer is verified and approved by you.")
 }
 
 func isLoopbackHost(host string) bool {
@@ -475,6 +480,17 @@ func warnIfInsecureMasterNodes(nodes []*masterNode) {
 	}
 }
 
+// readMasterLine is readGoalLine except that end of input is reported as io.EOF
+// so the master loop can exit instead of re-prompting forever on a closed stdin.
+func readMasterLine(reader *bufio.Reader) (string, error) {
+	if line, err, ok := readInteractiveLine(reader, goalLabel("[goal]: ")); ok {
+		return line, err
+	}
+	fmt.Print(goalLabel("[goal]: "))
+	line, err := reader.ReadString('\n')
+	return strings.TrimSpace(line), err
+}
+
 // runMaster is the terminal loop of master mode: it orchestrates remote recon
 // API instances instead of running an agent locally.
 func runMaster(list string) error {
@@ -483,19 +499,26 @@ func runMaster(list string) error {
 		return err
 	}
 	ShowBanner()
+	warnIfInsecureOllamaURL(ollamaURL)
+	warnIfInsecureOllamaTLS()
 	warnIfInsecureMasterNodes(nodes)
 	if agentAPIToken == "" {
 		fmt.Println(info("RECON_API_TOKEN is not set; no Authorization header will be sent."))
 	}
-	fmt.Println(info(fmt.Sprintf("Master mode: %d node(s)", len(nodes))))
+	fmt.Println(info(fmt.Sprintf("Master mode: %d node(s); orchestrator model %s", len(nodes), modelName)))
 	checkContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	printMasterNodes(checkContext, nodes, os.Stdout)
+	if message, err := checkOllamaReachable(checkContext, ollamaURL); err != nil {
+		fmt.Println(warn("Ollama unreachable (the orchestrator needs it; /broadcast does not):"), err)
+	} else {
+		fmt.Println(success(message))
+	}
 	cancel()
-	fmt.Println(info("Enter an objective to run it on every node. Use /h for help.\n"))
+	fmt.Println(info("Enter an objective for the orchestrator, or /broadcast GOAL for every node. Use /h for help.\n"))
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		line, err := readGoalLine(reader)
+		line, err := readMasterLine(reader)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
@@ -512,18 +535,44 @@ func runMaster(list string) error {
 		case "/h", "/help":
 			printMasterHelp()
 			continue
+		case "/m":
+			fmt.Println(info("Model: " + modelName))
+			continue
 		case "/nodes":
 			checkContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			printMasterNodes(checkContext, nodes, os.Stdout)
 			cancel()
 			continue
 		}
-		if strings.HasPrefix(line, "/") {
+		broadcast := false
+		if fields := strings.Fields(line); strings.EqualFold(fields[0], "/broadcast") {
+			line = strings.TrimSpace(line[len(fields[0]):])
+			if line == "" {
+				fmt.Println(warn("Usage: /broadcast GOAL"))
+				continue
+			}
+			broadcast = true
+		} else if strings.HasPrefix(line, "/") {
 			fmt.Println(warn("Unknown command:"), line)
 			continue
 		}
-		signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-		err = runMasterGoal(signalContext, reader, nodes, line, os.Stdout)
+		signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		if !broadcast {
+			preflight, cancelPreflight := context.WithTimeout(signalContext, 5*time.Second)
+			_, ollamaErr := checkOllamaReachable(preflight, ollamaURL)
+			cancelPreflight()
+			if ollamaErr != nil && signalContext.Err() == nil {
+				stop()
+				fmt.Println(warn("The orchestrator needs its own Ollama model, but "+ollamaURL+" is unreachable:"), ollamaErr)
+				fmt.Println(info("The master does not use the nodes' Ollama. Set OLLAMA_URL and OLLAMA_MODEL for the master process, or use /broadcast GOAL to send a goal to every node without an orchestrator."))
+				continue
+			}
+		}
+		if broadcast {
+			err = runMasterGoal(signalContext, reader, nodes, line, os.Stdout)
+		} else {
+			err = orchestrateMaster(signalContext, reader, nodes, line, os.Stdout)
+		}
 		stop()
 		if err != nil {
 			fmt.Println(warn("Master run failed:"), err)

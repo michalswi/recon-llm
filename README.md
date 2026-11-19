@@ -242,21 +242,40 @@ By default recon is a standalone agent. Start it with `-master` and a comma-sepa
 # on each worker host (they run the agent and talk to their own Ollama)
 RECON_API_TOKEN=<token> ./recon -api-address 0.0.0.0:8080
 
-# on the master
+# on the master (OLLAMA_* configures the orchestrator's own model, not the nodes')
+OLLAMA_URL=http://localhost:11434/api/chat OLLAMA_MODEL=<capable-model> \
 RECON_API_TOKEN=<token> ./recon -master http://10.0.0.5:8080,https://recon.example.com/node2
 ```
 
-The master runs no model itself and needs no Ollama; `OLLAMA_*` settings are ignored. It cannot be combined with `-api-address`.
+Without a token (trusted network only, e.g. a lab, or loopback with SSH tunnels), omit `RECON_API_TOKEN` on both sides:
 
-- **Fan-out:** a typed objective is sent to every node as a normal API run (`POST /api/agent/runs`). Each node uses its own model, worker, critic, skills, allowlist and limits.
-- **Live progress:** each node's commands, warnings and errors are printed with the node label.
-- **Decisions stay with you:** clarifications, candidate approval (accept, revise or stop) and iteration-limit continuation are asked per node, exactly as in the terminal.
-- **Aggregation:** a summary table (node, status, iterations) is printed, followed by every accepted answer.
-- **Resilience:** an unreachable node or one that rejects the run does not stop the others; it is marked `rejected` or `unreachable` in the summary.
-- **Ctrl+C** cancels the active runs on all nodes.
-- Commands: `/nodes` checks reachability and that the token is accepted, `/h` shows help, `/q` exits.
+```sh
+# on each worker host: bind to loopback and reach it through an SSH tunnel
+./recon -api-address 127.0.0.1:8080
 
-**Security:** the master can make every node execute commands. Always set `RECON_API_TOKEN` (the same value on all nodes; it is sent as a bearer token) and use `https://` through a trusted reverse proxy or an encrypted tunnel for non-loopback nodes; the master warns about plain HTTP. Redirects are never followed, and control characters in node output are stripped before display. The master does not coordinate the nodes: do not point several nodes at the same target or attachment path without external coordination. Phase 1 sends the same objective to all nodes with no per-node targeting, skill selection or attachments, and the master does not itself plan or split work.
+# on the master, with tunnels such as: ssh -N -L 8081:127.0.0.1:8080 user@host1
+OLLAMA_MODEL=<capable-model> ./recon -master http://127.0.0.1:8081,http://127.0.0.1:8082
+```
+
+A node bound beyond loopback without a token (e.g. `0.0.0.0:8080`) prints a warning: anyone who can reach the port can make it run commands.
+
+The master uses its own Ollama model (`OLLAMA_URL`, `OLLAMA_MODEL`, ... read from the master's environment, default `localhost:11434`) as the **orchestrator**; each node uses the Ollama configured in its own environment. A running Ollama is required on the master for objectives, but not for `/broadcast`; if it is unreachable, the master says so immediately instead of retrying. `-master` cannot be combined with `-api-address`. Nodes are numbered `n1`, `n2`, ... in the order given.
+
+**Orchestrator (default).** A typed objective is handled by an LLM orchestrator that works through six strict JSON actions: `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification` and `answer`.
+
+- **Splitting:** it breaks the objective into self-contained subtasks and dispatches each to a chosen node as a normal API run (`POST /api/agent/runs`). Each node uses its own model, worker, critic, skills, allowlist and limits. A node sees only the goal it is sent, not the objective or other nodes' results.
+- **Waiting:** `check_run` waits for a run to leave `running` without extra model calls and relays the node's commands, warnings and errors live.
+- **Review:** it accepts a node's verified candidate, sends specific feedback (also used to answer a node's clarification), continues a paused run, or cancels it.
+- **Merge:** it returns one answer. An independent master critic checks that every claim is supported by the node results shown and that failed or unreachable runs are reported; you then accept, revise or stop, as in the terminal.
+- **Your approval:** every dispatch is shown and needs your `y`/`n`, or `a` to allow all dispatches for the current objective. Declined dispatches are never sent. The orchestrator may also ask you clarifying questions.
+- **Cleanup:** runs that are not accepted are cancelled when the orchestration ends, on Ctrl+C or SIGTERM, and on errors.
+- **Limits:** at most 16 runs per objective, `RECON_MAX_ITERATIONS` model steps per segment (then continue [c] or stop [s]), and three consecutive invalid model responses end the orchestration.
+
+**Broadcast.** `/broadcast GOAL` skips the orchestrator and sends the same goal to every node. Candidate approval, clarification and continuation are asked per node, and a summary table plus every accepted answer is printed. It works even if the master's Ollama is unreachable.
+
+Other commands: `/nodes` checks reachability and that the token is accepted, `/m` shows the orchestrator model, `/h` shows help and `/q` exits. Ctrl+C cancels the active runs on all nodes. An unreachable node or one that rejects a run never stops the others.
+
+**Security:** the master can make every node execute commands, and the orchestrator's goals are written by a model. Always set `RECON_API_TOKEN` (the same value on all nodes; it is sent as a bearer token) and use `https://` through a trusted reverse proxy or an encrypted tunnel for non-loopback nodes; the master warns about plain HTTP. Redirects are never followed, node output is treated as untrusted data in the orchestrator prompt, and control characters in it are stripped before display. Dispatched runs have no writable roots, attachments or explicit skills; nodes may pick skills automatically. The master does not deduplicate work: do not point several nodes at the same target or attachment path without external coordination. The orchestration transcript is not persisted by the master; each node keeps its own run snapshots. Small models struggle with this protocol, so use a capable model for the orchestrator.
 
 ## Agent Guarantees
 
