@@ -62,7 +62,20 @@ func main() {
 	checkOllamaPSFlag := flag.Bool("check-ollama-ps", false, "show models currently loaded in Ollama (/api/ps), then exit")
 	checkOllamaModelsFlag := flag.Bool("check-ollama-models", false, "show models available in Ollama (/api/tags), then exit")
 	apiAddressFlag := flag.String("api-address", agentAPIAddress, "run the agent HTTP API at this address")
+	masterFlag := flag.String("master", "", "run as master: comma-separated recon API URLs to orchestrate (e.g. http://a:8080,http://b:8080)")
 	flag.Parse()
+
+	if strings.TrimSpace(*masterFlag) != "" {
+		if strings.TrimSpace(*apiAddressFlag) != "" {
+			fmt.Println(warn("-master cannot be combined with -api-address (or RECON_API_ADDRESS)."))
+			os.Exit(2)
+		}
+		if err := runMaster(*masterFlag); err != nil {
+			fmt.Println(warn("Master failed:"), err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	warnIfInsecureOllamaURL(ollamaURL)
 	warnIfInsecureOllamaTLS()

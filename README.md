@@ -53,6 +53,7 @@ On macOS and Linux, interactive prompts support left/right arrows, backspace, an
 | `SYSTEM_PROMPT` | built-in prompt | Optional path to the agent base prompt |
 | `RECON_API_ADDRESS` | unset | Run the HTTP API at this address instead of the terminal |
 | `RECON_API_RUN_RETENTION_MINUTES` | `30` | Minutes to retain finished API runs in memory; `0` disables eviction |
+| `RECON_API_TOKEN` | unset | API: require `Authorization: Bearer <token>` on every request. Master mode (`-master`): token sent to every node |
 
 Plain HTTP to a non-loopback host triggers a startup warning: prompts and responses travel unencrypted. Use HTTPS (with `OLLAMA_CA_CERT` for a private CA) or an encrypted tunnel.
 
@@ -205,7 +206,7 @@ Responses expose `iteration` (lifetime total), `segmentIteration` (current segme
 
 Finished runs (`completed`/`failed`/`cancelled`/`limit_reached`) leave the in-memory registry after the configured retention period. Active and waiting runs, and on-disk snapshots, are retained.
 
-The API is disabled by default, has no authentication, and can execute commands through the agent. Keep it on loopback or behind a trusted authenticated proxy.
+The API is disabled by default and can execute commands through the agent. Without `RECON_API_TOKEN` it has no authentication: keep it on loopback or behind a trusted authenticated proxy (binding beyond loopback without a token prints a warning). With `RECON_API_TOKEN` set, every request, including `/api/health`, must send `Authorization: Bearer <token>`; use HTTPS or an encrypted tunnel so the token and results are not exposed on the network.
 
 ### Example: use a skill over the API
 
@@ -232,6 +233,30 @@ curl -sS -X POST http://127.0.0.1:8080/api/agent/runs/<run-id>/approve
 The creation response lists `activeSkills` (explicitly selected) and `availableSkills` (the loadable catalog), as names and descriptions only. The run's events show the agent running `ping -c 5 google.com`, followed by a candidate report based on that real output.
 
 An unknown or invalid skill name returns `400` with the reason, and runs are created even if other installed skills are invalid; skipped skills appear as `warning` events. If `OLLAMA_NUM_CTX` is set, a `warning` event also appears when active skills use at least 25% of it.
+
+## Master Mode
+
+By default recon is a standalone agent. Start it with `-master` and a comma-separated list of recon API URLs to make it a **master** that drives many instances at once:
+
+```sh
+# on each worker host (they run the agent and talk to their own Ollama)
+RECON_API_TOKEN=<token> ./recon -api-address 0.0.0.0:8080
+
+# on the master
+RECON_API_TOKEN=<token> ./recon -master http://10.0.0.5:8080,https://recon.example.com/node2
+```
+
+The master runs no model itself and needs no Ollama; `OLLAMA_*` settings are ignored. It cannot be combined with `-api-address`.
+
+- **Fan-out:** a typed objective is sent to every node as a normal API run (`POST /api/agent/runs`). Each node uses its own model, worker, critic, skills, allowlist and limits.
+- **Live progress:** each node's commands, warnings and errors are printed with the node label.
+- **Decisions stay with you:** clarifications, candidate approval (accept, revise or stop) and iteration-limit continuation are asked per node, exactly as in the terminal.
+- **Aggregation:** a summary table (node, status, iterations) is printed, followed by every accepted answer.
+- **Resilience:** an unreachable node or one that rejects the run does not stop the others; it is marked `rejected` or `unreachable` in the summary.
+- **Ctrl+C** cancels the active runs on all nodes.
+- Commands: `/nodes` checks reachability and that the token is accepted, `/h` shows help, `/q` exits.
+
+**Security:** the master can make every node execute commands. Always set `RECON_API_TOKEN` (the same value on all nodes; it is sent as a bearer token) and use `https://` through a trusted reverse proxy or an encrypted tunnel for non-loopback nodes; the master warns about plain HTTP. Redirects are never followed, and control characters in node output are stripped before display. The master does not coordinate the nodes: do not point several nodes at the same target or attachment path without external coordination. Phase 1 sends the same objective to all nodes with no per-node targeting, skill selection or attachments, and the master does not itself plan or split work.
 
 ## Agent Guarantees
 

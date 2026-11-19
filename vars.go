@@ -84,6 +84,10 @@ func parseDurationEnv(key string, defaultValue time.Duration) time.Duration {
 var systemPrompt, systemPromptName = utils.LoadSystemPromptWithName(defaultSystemPrompt)
 var agentAPIAddress = utils.GetEnv("RECON_API_ADDRESS", "")
 
+// agentAPIToken, when set, is required as "Authorization: Bearer <token>" by the
+// HTTP API and is sent by master mode (-master) to every node.
+var agentAPIToken = strings.TrimSpace(utils.GetEnv("RECON_API_TOKEN", ""))
+
 // agentAPIRetentionMinutes bounds how long a terminal (completed/failed/
 // cancelled/limit_reached) API run stays in agentAPI.runs before it becomes
 // eligible for eviction; 0 disables eviction. The on-disk snapshot remains the

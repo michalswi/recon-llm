@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -107,14 +110,47 @@ func (api *agentAPI) handler() http.Handler {
 	return mux
 }
 
+// requireAPIToken rejects requests lacking the expected bearer token. Both values
+// are hashed first so the comparison is constant-time regardless of length.
+func requireAPIToken(token string, next http.Handler) http.Handler {
+	expected := sha256.Sum256([]byte(token))
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		provided, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
+		actual := sha256.Sum256([]byte(provided))
+		if !ok || provided == "" || subtle.ConstantTimeCompare(expected[:], actual[:]) != 1 {
+			response.Header().Set("WWW-Authenticate", "Bearer")
+			writeAgentAPIError(response, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(response, request)
+	})
+}
+
+func isLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(host)
+}
+
 func runAgentAPIServer(address string) error {
+	handler := newAgentAPI().handler()
+	if agentAPIToken != "" {
+		handler = requireAPIToken(agentAPIToken, handler)
+	} else if !isLoopbackAddress(address) {
+		fmt.Println(warn(fmt.Sprintf("Warning: the API at %s is reachable beyond loopback without authentication and can execute commands. Set RECON_API_TOKEN or bind to 127.0.0.1.", address)))
+	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           newAgentAPI().handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       time.Minute,
 	}
 	fmt.Printf("Agent API listening on http://%s\n", address)
+	if agentAPIToken != "" {
+		fmt.Println(info("Bearer token authentication is enabled (RECON_API_TOKEN)."))
+	}
 	return server.ListenAndServe()
 }
 
