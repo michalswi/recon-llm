@@ -25,6 +25,7 @@ type fakeMasterNode struct {
 	feedback string
 	hang     bool
 	goal     string
+	files    []AgentFileContent
 }
 
 func (f *fakeMasterNode) called(call string) bool {
@@ -61,6 +62,7 @@ func (f *fakeMasterNode) ServeHTTP(response http.ResponseWriter, request *http.R
 		var created AgentRequest
 		_ = json.NewDecoder(request.Body).Decode(&created)
 		f.goal = created.Goal
+		f.files = created.FileContents
 		f.status = agentRunning
 		writeAgentAPIJSON(response, http.StatusAccepted, run())
 	case request.Method == http.MethodGet && request.URL.Path == "/api/agent/runs/run_1":

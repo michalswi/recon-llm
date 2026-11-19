@@ -31,6 +31,9 @@ type AgentRequest struct {
 	FilePaths          []string `json:"filePaths,omitempty"`
 	WritableRoots      []string `json:"writableRoots,omitempty"`
 	Skills             []string `json:"skills,omitempty"`
+	// FileContents carries file text read by the caller (e.g. a master instance),
+	// for files this process cannot access. See agent_filecontent.go.
+	FileContents       []AgentFileContent `json:"fileContents,omitempty"`
 	attachedSkillsOnly bool
 	skillsDisabled     bool
 }
@@ -551,6 +554,12 @@ func newTerminalAgentSession(request AgentRequest) (*agentSession, error) {
 			}
 		}
 	}
+
+	if err := validateAgentFileContents(request.FileContents, len(resolvedAttachments)); err != nil {
+		return nil, err
+	}
+	fileContentNote, _ := agentFileContentNote(request.FileContents, attachmentTextRemaining)
+	attachmentNote.WriteString(fileContentNote)
 
 	if _, err := composeAgentPrompt(systemPrompt, goalDescription, "No previous attempts yet."); err != nil {
 		return nil, fmt.Errorf("load agent prompt: %w", err)

@@ -374,12 +374,17 @@ func forEachMasterNode(nodes []*masterNode, fn func(*masterNode)) {
 // prints an aggregated summary. Nodes run independently; one failing node does
 // not stop the others.
 func runMasterGoal(ctx context.Context, reader *bufio.Reader, nodes []*masterNode, goal string, out io.Writer) error {
+	return runMasterRequest(ctx, reader, nodes, AgentRequest{Goal: goal}, out)
+}
+
+// runMasterRequest is runMasterGoal for a full request, e.g. one carrying files.
+func runMasterRequest(ctx context.Context, reader *bufio.Reader, nodes []*masterNode, request AgentRequest, out io.Writer) error {
 	for _, node := range nodes {
 		*node = masterNode{base: node.base, label: node.label, token: node.token, client: node.client}
 	}
 	forEachMasterNode(nodes, func(node *masterNode) {
 		var run agentAPIRunResponse
-		if err := node.call(ctx, http.MethodPost, "/api/agent/runs", AgentRequest{Goal: goal}, &run); err != nil {
+		if err := node.call(ctx, http.MethodPost, "/api/agent/runs", request, &run); err != nil {
 			node.status = masterNodeRejected
 			node.errText = err.Error()
 			return
@@ -637,15 +642,16 @@ func runMaster(list string) error {
 			}
 		}
 		if broadcast {
-			sent := line
-			if block, truncated := masterAttachmentBlock(masterAttachments); block != "" {
-				sent += block
+			request := AgentRequest{Goal: line}
+			if len(masterAttachments) > 0 {
+				var truncated bool
+				request.FileContents, truncated = masterFileContents(masterAttachments)
 				fmt.Println(info("Sending file contents with the goal:\n" + masterAttachmentsSummary(masterAttachments)))
 				if truncated {
 					fmt.Println(warn("Some content was truncated to fit the 64 KiB limit."))
 				}
 			}
-			err = runMasterGoal(signalContext, reader, nodes, sent, os.Stdout)
+			err = runMasterRequest(signalContext, reader, nodes, request, os.Stdout)
 		} else {
 			err = orchestrateMaster(signalContext, reader, nodes, line, os.Stdout)
 		}

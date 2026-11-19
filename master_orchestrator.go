@@ -297,9 +297,15 @@ func (o *masterOrchestrator) dispatch(action masterAction) (string, bool, error)
 	if len(o.runs) >= maxMasterRuns {
 		return fmt.Sprintf("Run limit reached (%d). Reuse or cancel existing runs instead of dispatching more.", maxMasterRuns), false, nil
 	}
-	selected, err := findMasterAttachments(o.files, action.Files)
-	if err != nil {
-		return fmt.Sprintf("%s. Attached files:\n%s", err, masterAttachmentsPromptText(o.files)), false, nil
+	// An omitted "files" means every attached file: the user attached them on
+	// purpose and a node cannot see them otherwise. An explicit empty list opts out.
+	selected := o.files
+	if action.Files != nil {
+		var err error
+		selected, err = findMasterAttachments(o.files, action.Files)
+		if err != nil {
+			return fmt.Sprintf("%s. Attached files:\n%s", err, masterAttachmentsPromptText(o.files)), false, nil
+		}
 	}
 	if !o.autoAllow {
 		fmt.Fprintf(o.out, "%s dispatch to %s (%s):\n%s\n", accent("[Master]"), alias, template.label, action.Goal)
@@ -321,8 +327,8 @@ func (o *masterOrchestrator) dispatch(action masterAction) (string, bool, error)
 	id := fmt.Sprintf("r%d", len(o.runs)+1)
 	node := &masterNode{base: template.base, label: id + "@" + template.label, token: template.token, client: template.client}
 	var created agentAPIRunResponse
-	block, truncated := masterAttachmentBlock(selected)
-	request := AgentRequest{Goal: action.Goal + block, ExpectedOutput: action.ExpectedOutput, Constraints: action.Constraints}
+	contents, truncated := masterFileContents(selected)
+	request := AgentRequest{Goal: action.Goal, ExpectedOutput: action.ExpectedOutput, Constraints: action.Constraints, FileContents: contents}
 	if err := node.call(o.ctx, http.MethodPost, "/api/agent/runs", request, &created); err != nil {
 		return fmt.Sprintf("Dispatch to %s failed: %s. Fix the request or choose another node; do not repeat an identical failing dispatch.", alias, sanitizeRemoteText(err.Error())), false, nil
 	}
@@ -331,7 +337,7 @@ func (o *masterOrchestrator) dispatch(action masterAction) (string, bool, error)
 	o.say("%s started on %s", id, template.label)
 	note := ""
 	if len(selected) > 0 {
-		note = " File contents were sent with the goal."
+		note = " File contents were sent with it: " + strings.ReplaceAll(masterAttachmentsSummary(selected), "\n", "; ") + "."
 		if truncated {
 			note += " Some content was truncated to fit the 64 KiB limit."
 		}

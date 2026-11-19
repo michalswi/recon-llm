@@ -21,6 +21,7 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `procgroup_unix.go`/`procgroup_other.go`: background-job process-group start/kill, platform-specific.
 - `vars.go`: version, built-in prompt, environment configuration, and process state.
 - `master.go`: opt-in `-master` mode: node client for the recon API, `/broadcast` fan-out with per-node approval, terminal loop, and bearer-token/redirect/output-sanitizing safeguards.
+- `master_attach.go`: master-side `/attach`, `/attached` and `/detach`; files are read on the master and sent as text in the API's `fileContents` field under recon's inline limits (64 KiB for a single file, 1 KiB per directory file, 64 KiB per goal).
 - `master_orchestrator.go` and `prompts/master.txt`: the master's LLM orchestrator (strict actions `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification`, `answer`), its run registry, master critic, user dispatch approval, and cleanup.
 - `prompts/agent.txt`: strict agent action protocol embedded at build time.
 - `prompts/*.txt`: base prompts embedded at build time.
@@ -79,7 +80,7 @@ Terminal run snapshots are persisted under `~/.recon/agent_runs/<run-id>.json`. 
 
 The API is enabled with `-api-address <address>` or `RECON_API_ADDRESS`; it is disabled by default and replaces the interactive terminal loop for that process. It reuses the terminal session constructor and worker rather than implementing a separate agent engine.
 
-- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object. Optional `writableRoots` entries must name existing directories; they authorize native `write_file` actions beneath those roots for that run.
+- `POST /api/agent/runs` creates and asynchronously starts a run from an `AgentRequest` JSON object. Optional `fileContents` entries (`name`, `size`, `content`, `truncated`, `note`; see `agent_filecontent.go`) carry file text read by the caller, e.g. a master instance; they are validated (30 files shared with attachments, 64 KiB of text per file and in total, plain names, UTF-8) and stored in `AttachmentNote` like local attachments, never in the objective, so keyword heuristics on the goal (`goalRequiresCodeDeliverable`, `requiredGoalCommand`) cannot be triggered by file text. Optional `writableRoots` entries must name existing directories; they authorize native `write_file` actions beneath those roots for that run.
 - `GET /api/agent/runs/{id}` returns sanitized run state, events, plans, and candidate output.
 - `POST /api/agent/runs/{id}/feedback` resumes clarification or revises a candidate.
 - `POST /api/agent/runs/{id}/approve` accepts a verified candidate.

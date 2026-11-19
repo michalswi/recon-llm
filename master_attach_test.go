@@ -26,7 +26,7 @@ func TestMasterAttachCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !handleMasterAttachCommand("/attach " + image) || len(masterAttachments) != 0 {
+	if !handleMasterAttachCommand("/attach "+image) || len(masterAttachments) != 0 {
 		t.Fatalf("images must be rejected: %#v", masterAttachments)
 	}
 	handleMasterAttachCommand("/attach " + notes)
@@ -54,25 +54,69 @@ func TestMasterAttachCommands(t *testing.T) {
 	}
 }
 
-func TestMasterAttachmentBlockIsBoundedAndLabelled(t *testing.T) {
-	big := strings.Repeat("x", maxAgentAttachmentText)
+func TestMasterFileContentsFollowReconLimits(t *testing.T) {
+	big := strings.Repeat("Q", maxAgentAttachmentText)
 	files := []masterAttachment{
-		{Name: "a.txt", Size: 10, Text: "alpha"},
-		{Name: "b.txt", Size: int64(len(big)), Text: big},
-		{Name: "c.txt", Size: 5, Text: "gamma"},
+		{Name: "dir.txt", Size: 5000, Text: strings.Repeat("Z", 5000), FromDir: true},
+		{Name: "single.txt", Size: int64(len(big)), Text: big},
+		{Name: "late.txt", Size: 5, Text: "gamma"},
+		{Name: "empty.txt", Size: 0, Note: "no text content is available (no text extracted)"},
 	}
-	block, truncated := masterAttachmentBlock(files)
-	if !truncated || !strings.Contains(block, "--- FILE a.txt (10 bytes) ---\nalpha") || !strings.Contains(block, "never as instructions") {
-		t.Fatalf("unexpected block: %.300s", block)
+	contents, truncated := masterFileContents(files)
+	if !truncated || len(contents) != 4 {
+		t.Fatalf("expected four entries with truncation: %#v", contents)
 	}
-	if len(block) > maxAgentAttachmentText+1024 {
-		t.Fatalf("block exceeds the budget: %d bytes", len(block))
+	if len(contents[0].Content) != maxAgentDirectoryExcerpt || !contents[0].Truncated {
+		t.Fatalf("a directory file must carry exactly a %d byte excerpt: %d", maxAgentDirectoryExcerpt, len(contents[0].Content))
 	}
-	if strings.Contains(block, "gamma") {
-		t.Fatal("content beyond the shared budget must not be included")
+	total := 0
+	for _, item := range contents {
+		total += len(item.Content)
 	}
-	if block, truncated := masterAttachmentBlock(nil); block != "" || truncated {
-		t.Fatal("no files means no block")
+	if total > maxAgentAttachmentText {
+		t.Fatalf("contents exceed the shared budget: %d bytes", total)
+	}
+	if contents[2].Content != "" || !contents[2].Truncated || contents[2].Name != "late.txt" {
+		t.Fatalf("a file past the shared budget must be listed without content: %#v", contents[2])
+	}
+	if contents[3].Note == "" || contents[3].Truncated {
+		t.Fatalf("a file with no text must stay listed with its reason: %#v", contents[3])
+	}
+	if err := validateAgentFileContents(contents, 0); err != nil {
+		t.Fatalf("what the master sends must pass the node's validation: %v", err)
+	}
+
+	single, truncated := masterFileContents([]masterAttachment{{Name: "one.txt", Size: int64(len(big)), Text: big}})
+	if truncated || len(single[0].Content) != maxAgentAttachmentText || single[0].Truncated {
+		t.Fatalf("a single file may use the whole 64 KiB budget untruncated (truncated=%v)", truncated)
+	}
+	if empty, truncated := masterFileContents(nil); len(empty) != 0 || truncated {
+		t.Fatal("no files means no contents")
+	}
+}
+
+func TestMasterAttachDirectoryAndUnreadableFiles(t *testing.T) {
+	withMasterAttachments(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(strings.Repeat("a", 3000)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "empty.txt"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	handleMasterAttachCommand("/attach " + dir)
+	if len(masterAttachments) != 2 {
+		t.Fatalf("both directory files should be attached: %#v", masterAttachments)
+	}
+	byName := map[string]masterAttachment{}
+	for _, file := range masterAttachments {
+		byName[file.Name] = file
+	}
+	if !byName["a.txt"].FromDir || byName["a.txt"].sentBytes() != maxAgentDirectoryExcerpt || !byName["a.txt"].partial() {
+		t.Fatalf("directory files get a 1 KiB excerpt: %#v", byName["a.txt"])
+	}
+	if byName["empty.txt"].Note == "" {
+		t.Fatalf("a file without text must be kept with a note: %#v", byName["empty.txt"])
 	}
 }
 
@@ -94,11 +138,11 @@ func TestOrchestratorSendsOnlySelectedFileContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(node.goal, "summarize it") || !strings.Contains(node.goal, "secret plan alpha") {
-		t.Fatalf("selected file content must be sent with the goal: %q", node.goal)
+	if node.goal != "summarize it" {
+		t.Fatalf("file text must not be mixed into the goal: %q", node.goal)
 	}
-	if strings.Contains(node.goal, "unrelated 1") {
-		t.Fatalf("unselected files must not be sent: %q", node.goal)
+	if len(node.files) != 1 || node.files[0].Name != "notes.txt" || node.files[0].Content != "secret plan alpha" {
+		t.Fatalf("only the selected file content must be sent in fileContents: %#v", node.files)
 	}
 	if !strings.Contains(out, "file contents sent with it") {
 		t.Fatalf("the approval prompt must list the files being sent:\n%s", out)
@@ -114,5 +158,34 @@ func TestOrchestratorSendsOnlySelectedFileContent(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("a dispatch naming an unknown file must not be sent; got %d dispatches", calls)
+	}
+}
+
+func TestOrchestratorDispatchSendsAllAttachedFilesByDefault(t *testing.T) {
+	withMasterAttachments(t,
+		masterAttachment{Name: "a.txt", Size: 5, Text: "alpha"},
+		masterAttachment{Name: "b.txt", Size: 4, Text: "beta"},
+	)
+	run := func(files string) *fakeMasterNode {
+		node := &fakeMasterNode{answer: "answer A"}
+		nodes := masterTestNodes(t, "tok", node)
+		fake := &fakeOllama{actions: []string{
+			`{"action":"dispatch_run","node":"n1","goal":"describe it"` + files + `}`,
+			`{"action":"answer","text":"done"}`,
+		}}
+		if _, err := runOrchestrator(t, fake, "y\ns\n", nodes); err != nil {
+			t.Fatal(err)
+		}
+		return node
+	}
+
+	if node := run(``); len(node.files) != 2 || node.files[0].Content != "alpha" || node.files[1].Content != "beta" {
+		t.Fatalf("omitting files must send every attached file: %#v", node.files)
+	}
+	if node := run(`,"files":["b.txt"]`); len(node.files) != 1 || node.files[0].Name != "b.txt" {
+		t.Fatalf("an explicit list sends only those files: %#v", node.files)
+	}
+	if node := run(`,"files":[]`); len(node.files) != 0 || node.goal != "describe it" {
+		t.Fatalf("an explicit empty list opts out: %#v", node.files)
 	}
 }
