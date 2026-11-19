@@ -275,6 +275,22 @@ The master uses its own Ollama model (`OLLAMA_URL`, `OLLAMA_MODEL`, ... read fro
 
 Other commands: `/nodes` checks reachability and that the token is accepted, `/m` shows the orchestrator model, `/h` shows help and `/q` exits. Ctrl+C cancels the active runs on all nodes. An unreachable node or one that rejects a run never stops the others.
 
+### Prompts and skills in master mode
+
+The master does not push prompts or skills to nodes; each node uses what is configured on its own host.
+
+| | Master | Nodes |
+|---|---|---|
+| **Base prompt** | `SYSTEM_PROMPT` has no effect on the orchestrator, which always uses the embedded `prompts/master.txt` protocol | Chosen when the node process starts (`SYSTEM_PROMPT`, otherwise the built-in default). The API has no per-run prompt field, so the master cannot change it |
+| **Skills** | Not used by the master itself, and it cannot list or attach a node's skills | Read from the node's own `~/.recon/skills/`. Runs started by the master do not select skills explicitly, so each node's agent may pick one automatically |
+
+Consequences:
+- To give a node a role, start it with its prompt, e.g. `SYSTEM_PROMPT=/path/pentester.txt ./recon -api-address 127.0.0.1:8080`, and install any skills on that host.
+- Automatic selection is the agent's decision and is unreliable with small models. A node may answer with a skill name instead of a valid action (e.g. `{"action":"ping-report"}`) and burn its iterations. Prefer explicit goals ("run `ping -c 5 google.com` and report ...") and a capable model on the nodes, or remove skills from nodes that should not use them.
+- To run a skill explicitly, call that node's API directly with `"skills":["name"]` (see [Example: use a skill over the API](#example-use-a-skill-over-the-api)) instead of going through the master.
+
+Explicit per-run skills and prompts from the master would need new request fields and are not implemented.
+
 **Security:** the master can make every node execute commands, and the orchestrator's goals are written by a model. Always set `RECON_API_TOKEN` (the same value on all nodes; it is sent as a bearer token) and use `https://` through a trusted reverse proxy or an encrypted tunnel for non-loopback nodes; the master warns about plain HTTP. Redirects are never followed, node output is treated as untrusted data in the orchestrator prompt, and control characters in it are stripped before display. Dispatched runs have no writable roots, attachments or explicit skills; nodes may pick skills automatically. The master does not deduplicate work: do not point several nodes at the same target or attachment path without external coordination. The orchestration transcript is not persisted by the master; each node keeps its own run snapshots. Small models struggle with this protocol, so use a capable model for the orchestrator.
 
 ## Agent Guarantees
