@@ -66,7 +66,7 @@ func handleEditSystemPrompt() {
 	files, _ := embeddedPrompts.ReadDir("prompts")
 	var promptFiles []string
 	for _, file := range files {
-		if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") && file.Name() != "agent.txt" && file.Name() != "master.txt" {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") && file.Name() != "_agent.txt" && file.Name() != "_master.txt" {
 			promptFiles = append(promptFiles, file.Name())
 		}
 	}

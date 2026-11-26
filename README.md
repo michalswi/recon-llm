@@ -88,7 +88,14 @@ For example, your goal is: "analyze output from pinging google.com five times an
 
 ### Example: ping a host and report the results
 
-Create the folder `~/.recon/skills/ping-report/`, then save this text as `SKILL.md` inside it:
+A ready-made copy of this example is in the repository at [skills/ping/SKILL.md](skills/ping/SKILL.md). The repository's `skills/` folder is only a staging area for your own skills; recon never reads it. To install a skill, copy it into recon's home directory, naming the destination folder after the skill's `name`:
+
+```sh
+mkdir -p ~/.recon/skills/ping-report
+cp skills/ping/SKILL.md ~/.recon/skills/ping-report/SKILL.md
+```
+
+Or create the folder `~/.recon/skills/ping-report/` yourself and save this text as `SKILL.md` inside it:
 
 ```markdown
 ---
@@ -156,6 +163,8 @@ No rebuild is needed. Edit the file to change the checklist; changes apply to ne
 | Set a role: "You are a network engineer" | Give a checklist: "Run ping and report these measurements" |
 | Built-in defaults, with external/custom overrides | External files; no rebuild needed |
 | One base prompt per run | Multiple skills per run |
+
+**Internal vs. base prompts:** files in [prompts/](prompts) starting with `_` are internal protocol prompts embedded in the binary: `_agent.txt` (the strict JSON action protocol, always added to the base prompt of every agent run) and `_master.txt` (the master orchestrator protocol). They are not offered as base prompts and `SYSTEM_PROMPT` does not replace them. The other `prompts/*.txt` files are selectable role prompts (via `/editsysprompt`, or `SYSTEM_PROMPT` for an external file).
 
 **File rules:** the header accepts only `name` and `description`. Names use lowercase letters, digits, and single separating hyphens (up to 64 characters). Descriptions can be up to 512 bytes; instructions must not be empty.
 
@@ -319,7 +328,7 @@ The master does not push prompts or skills to nodes; each node uses what is conf
 
 | | Master | Nodes |
 |---|---|---|
-| **Base prompt** | `SYSTEM_PROMPT` has no effect on the orchestrator, which always uses the embedded `prompts/master.txt` protocol | Chosen when the node process starts (`SYSTEM_PROMPT`, otherwise the built-in default). The API has no per-run prompt field, so the master cannot change it |
+| **Base prompt** | `SYSTEM_PROMPT` has no effect on the orchestrator, which always uses the embedded `prompts/_master.txt` protocol | Chosen when the node process starts (`SYSTEM_PROMPT`, otherwise the built-in default). The API has no per-run prompt field, so the master cannot change it |
 | **Skills** | Not used by the master itself, and it cannot list or attach a node's skills | Read from the node's own `~/.recon/skills/`. Runs started by the master do not select skills explicitly, so each node's agent may pick one automatically |
 
 Consequences:

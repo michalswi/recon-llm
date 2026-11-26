@@ -196,7 +196,7 @@ func (o *masterOrchestrator) registryText() string {
 }
 
 func (o *masterOrchestrator) systemPrompt() (string, error) {
-	data, err := embeddedPrompts.ReadFile("prompts/master.txt")
+	data, err := embeddedPrompts.ReadFile("prompts/_master.txt")
 	if err != nil {
 		return "", err
 	}
