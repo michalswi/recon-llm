@@ -2,16 +2,25 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
-const maxPromptHistoryEntries = 500
+const (
+	maxPromptHistoryEntries = 500
+	maxHistoryEntryBytes    = 16 << 10
+	maxPasteBytes           = 256 << 10
+)
 
 type promptHistory struct {
 	mu      sync.Mutex
@@ -30,12 +39,7 @@ func loadPromptHistory() *promptHistory {
 		if path, err := reconHistoryPath(); err == nil {
 			sharedPromptHistory.path = path
 			if data, readErr := os.ReadFile(path); readErr == nil {
-				lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-				for _, line := range lines {
-					if line != "" {
-						sharedPromptHistory.entries = append(sharedPromptHistory.entries, line)
-					}
-				}
+				sharedPromptHistory.entries = parsePromptHistory(string(data))
 				if len(sharedPromptHistory.entries) > maxPromptHistoryEntries {
 					sharedPromptHistory.entries = sharedPromptHistory.entries[len(sharedPromptHistory.entries)-maxPromptHistoryEntries:]
 				}
@@ -53,7 +57,27 @@ func reconHistoryPath() (string, error) {
 	return filepath.Join(baseDirectory, "history"), nil
 }
 
+func parsePromptHistory(data string) []string {
+	var entries []string
+	for _, line := range strings.Split(strings.TrimRight(data, "\n"), "\n") {
+		if strings.HasPrefix(line, "\x00") {
+			if decoded, err := strconv.Unquote(line[1:]); err == nil {
+				line = decoded
+			} else {
+				line = line[1:]
+			}
+		}
+		if line != "" {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
 func (h *promptHistory) add(line string) {
+	if len(line) > maxHistoryEntryBytes {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.entries) > 0 && h.entries[len(h.entries)-1] == line {
@@ -74,6 +98,9 @@ func (h *promptHistory) add(line string) {
 		return
 	}
 	defer file.Close()
+	if strings.ContainsAny(line, "\r\n\x00") {
+		line = "\x00" + strconv.Quote(line)
+	}
 	fmt.Fprintln(file, line)
 }
 
@@ -88,6 +115,8 @@ func readInteractiveLine(reader *bufio.Reader, label string) (line string, err e
 		return "", nil, false
 	}
 	defer restore()
+	fmt.Fprint(os.Stdout, "\x1b[?2004h")
+	defer fmt.Fprint(os.Stdout, "\x1b[?2004l")
 
 	line, err = runLineEditorWithOutputAndWidth(reader, label, loadPromptHistory(), os.Stdout, platformTerminalWidth(fd))
 	return line, err, true
@@ -111,10 +140,10 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 		terminalWidth = 80
 	}
 
-	buffer := make([]byte, 0, 64)
+	buffer := make([]rune, 0, 64)
 	cursor := 0
 	historyIndex := historyLen
-	var draft []byte
+	var draft []rune
 	labelWidth := visibleTerminalWidth(label)
 	renderedRows := 1
 	renderedCursorRow := 0
@@ -135,7 +164,16 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 		}
 		fmt.Fprint(output, "\r")
 		fmt.Fprint(output, label)
-		fmt.Fprint(output, string(buffer))
+		fmt.Fprint(output, strings.Map(func(r rune) rune {
+			switch {
+			case r == '\n':
+				return '↵'
+			case unicode.IsControl(r):
+				return ' '
+			default:
+				return r
+			}
+		}, string(buffer)))
 		renderedRows = terminalRows(labelWidth+len(buffer), terminalWidth)
 		endRow, _ := terminalPosition(labelWidth+len(buffer), terminalWidth)
 		cursorRow, cursorColumn := terminalPosition(labelWidth+cursor, terminalWidth)
@@ -151,14 +189,17 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 	redraw()
 
 	for {
-		b, readErr := reader.ReadByte()
+		r, size, readErr := reader.ReadRune()
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				return strings.TrimSpace(string(buffer)), io.EOF
 			}
 			return "", readErr
 		}
-		switch b {
+		if r == utf8.RuneError && size == 1 {
+			continue
+		}
+		switch r {
 		case '\r', '\n':
 			fmt.Fprint(output, "\r\n")
 			result := strings.TrimSpace(string(buffer))
@@ -189,6 +230,32 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 			if thirdErr != nil {
 				continue
 			}
+			if third == '2' {
+				matched := true
+				for _, expected := range []byte("00~") {
+					next, err := reader.ReadByte()
+					if err != nil || next != expected {
+						matched = false
+						break
+					}
+				}
+				if matched {
+					paste, truncated, err := readBracketedPaste(reader)
+					if err != nil {
+						return "", err
+					}
+					if truncated {
+						moveEditorCursor(output, labelWidth+len(buffer), terminalWidth, &renderedCursorRow)
+						fmt.Fprintf(output, "\r\npaste truncated to %d KiB\r\n", maxPasteBytes>>10)
+						renderedRows = 1
+						renderedCursorRow = 0
+					}
+					buffer = slices.Insert(buffer, cursor, paste...)
+					cursor += len(paste)
+					redraw()
+				}
+				continue
+			}
 			history.mu.Lock()
 			entries := append([]string(nil), history.entries...)
 			history.mu.Unlock()
@@ -198,12 +265,12 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 					continue
 				}
 				if historyIndex == len(entries) {
-					draft = append([]byte(nil), buffer...)
+					draft = append([]rune(nil), buffer...)
 				}
 				if historyIndex > 0 {
 					historyIndex--
 				}
-				buffer = []byte(entries[historyIndex])
+				buffer = []rune(entries[historyIndex])
 				cursor = len(buffer)
 				redraw()
 			case 'B': // Down
@@ -212,9 +279,9 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 				}
 				if historyIndex >= len(entries) {
 					historyIndex = len(entries)
-					buffer = append([]byte(nil), draft...)
+					buffer = append([]rune(nil), draft...)
 				} else {
-					buffer = []byte(entries[historyIndex])
+					buffer = []rune(entries[historyIndex])
 				}
 				cursor = len(buffer)
 				redraw()
@@ -230,21 +297,65 @@ func runLineEditorWithOutputAndWidth(reader *bufio.Reader, label string, history
 				}
 			}
 		default:
-			if b >= 32 {
+			if !unicode.IsControl(r) {
 				if cursor == len(buffer) {
-					buffer = append(buffer, b)
+					buffer = append(buffer, r)
 					cursor++
-					fmt.Fprintf(output, "%c", b)
+					fmt.Fprintf(output, "%c", r)
 					renderedRows = terminalRows(labelWidth+len(buffer), terminalWidth)
 					renderedCursorRow, _ = terminalPosition(labelWidth+cursor, terminalWidth)
 					continue
 				}
-				buffer = append(buffer[:cursor], append([]byte{b}, buffer[cursor:]...)...)
+				buffer = slices.Insert(buffer, cursor, r)
 				cursor++
 				redraw()
 			}
 		}
 	}
+}
+
+// readBracketedPaste reads up to the end marker, normalizes line breaks to
+// "\n" and drops control characters other than newline and tab. Input beyond
+// maxPasteBytes is discarded and reported through truncated.
+func readBracketedPaste(reader *bufio.Reader) (paste []rune, truncated bool, err error) {
+	const end = "\x1b[201~"
+	var data []byte
+	tail := make([]byte, 0, len(end))
+	for {
+		b, readErr := reader.ReadByte()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil, false, io.ErrUnexpectedEOF
+			}
+			return nil, false, readErr
+		}
+		if len(tail) == len(end) {
+			if len(data) < maxPasteBytes {
+				data = append(data, tail[0])
+			} else {
+				truncated = true
+			}
+			copy(tail, tail[1:])
+			tail = tail[:len(end)-1]
+		}
+		tail = append(tail, b)
+		if string(tail) == end {
+			break
+		}
+	}
+	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+	data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+	for len(data) > 0 {
+		r, size := utf8.DecodeRune(data)
+		data = data[size:]
+		if r == utf8.RuneError && size == 1 {
+			continue
+		}
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			paste = append(paste, r)
+		}
+	}
+	return paste, truncated, nil
 }
 
 func terminalRows(contentWidth, terminalWidth int) int {

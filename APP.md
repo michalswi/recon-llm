@@ -22,9 +22,10 @@ A user submits an objective. The backend worker repeatedly asks the model for on
 - `vars.go`: version, built-in prompt, environment configuration, and process state.
 - `master.go`: opt-in `-master` mode: node client for the recon API, `/broadcast` fan-out with per-node approval, terminal loop, and bearer-token/redirect/output-sanitizing safeguards.
 - `master_attach.go`: master-side `/attach`, `/attached` and `/detach`; files are read on the master and sent as text in the API's `fileContents` field under recon's inline limits (64 KiB for a single file, 1 KiB per directory file, 64 KiB per goal).
-- `master_orchestrator.go` and `prompts/master.txt`: the master's LLM orchestrator (strict actions `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification`, `answer`), its run registry, master critic, user dispatch approval, and cleanup.
-- `prompts/agent.txt`: strict agent action protocol embedded at build time.
-- `prompts/*.txt`: base prompts embedded at build time.
+- `master_orchestrator.go` and `prompts/_master.txt`: the master's LLM orchestrator (strict actions `list_nodes`, `dispatch_run`, `check_run`, `respond_run`, `request_clarification`, `answer`), its run registry, master critic, user dispatch approval, and cleanup.
+- `prompts/_agent.txt`: strict agent action protocol embedded at build time.
+- `prompts/*.txt` (no `_` prefix): selectable base prompts embedded at build time. The `_` prefix marks internal protocol prompts (`_agent.txt`, `_master.txt`); they are loaded by name and explicitly excluded from the base-prompt menu in `help.go`.
+- `skills/`: maintainer's staging area for skills, e.g. the `ping-report` example in `skills/ping/SKILL.md` and the receive-only SDR skills `adsb-aircraft-report`, `satellite-tle-report` and `drone-remote-id-report` (pair them with the `sdr_airspace_space.txt` base prompt). Not read by recon; copy a skill to `~/.recon/skills/<name>/` to install it.
 
 ## Runtime Configuration
 
@@ -61,6 +62,8 @@ The application sends non-streaming chat requests. Agent calls set `format: "jso
 On macOS and Linux, interactive stdin prompts (`[goal]:`, clarification, revision feedback, structured `/agent` fields) support arrow-key cursor movement and up/down history recall, implemented with direct termios ioctl calls (`termios_darwin.go`, `termios_linux.go`) and no external dependency. History is persisted to `~/.recon/history`. Non-interactive or piped stdin automatically falls back to plain line reading, preserving existing scripted and test behavior.
 
 ## Terminal Lifecycle
+
+Interactive prompts enable bracketed paste while reading. A multiline paste stays in the edit buffer until Enter; newline markers are for display only. Pasted text is normalized to `\n`, stripped of control characters other than newline and tab, and capped at 256 KiB. The editor is rune-aware, so cursor movement and backspace work on whole UTF-8 characters. Multiline history entries are quoted on disk so recall restores one prompt, not separate lines; entries over 16 KiB are submitted but not saved to history. Non-interactive input remains line-oriented.
 
 Plain terminal input starts a run using that text as the objective. `/agent [GOAL]` collects the full `AgentGoalSpec`: objective, expected output, constraints, completion criteria, optional attachment path, an optional writable root, and optional comma-separated skill names. Runs without an explicitly authorized writable root remain answer-only for generated file content.
 
@@ -121,6 +124,8 @@ The decoder requires exactly one JSON object and rejects unknown fields or trail
 
 Skills are reusable task instructions stored at `~/.recon/skills/<name>/SKILL.md`. They are external, not built into the binary. See the [README example](README.md#external-skills) for the file format and setup.
 
+The repository's `skills/` folder (e.g. `skills/ping/SKILL.md`, the `ping-report` example) is a staging area for the maintainer's own skills and is not scanned by recon; there is no project-local discovery. A skill takes effect only after it is copied to `~/.recon/skills/<name>/SKILL.md`, where the destination folder name must match the skill's `name` (so `skills/ping/` is installed as `~/.recon/skills/ping-report/`).
+
 **Prompts define the role; skills explain a task.** A run uses one base prompt and can load several skills. Both follow the embedded agent protocol and the user's constraints.
 
 - **Selection:** `/skills` lists available skills. `/agent` accepts comma-separated names; the API accepts `"skills":["report"]`. The worker can also select a skill using `{"action":"load_skill","skill":"report"}`, consuming one iteration.
@@ -154,7 +159,7 @@ The nominal command allowlist is defined in `comm.go`. Agent commands are valida
 
 Do not claim the allowlist is a security boundary. Use recon only in a trusted environment and only for authorized targets. Instances/runs share no coordination — do not point multiple instances at the same target or attachment path without external coordination. Master mode (`-master`) is the one explicit coordinator: its orchestrator only dispatches subtasks to nodes through their public API, asks the user to approve every dispatch, and does not deduplicate or split work beyond what its model decides.
 
-New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `agent.txt` — don't restate or override it. Deliver requested files with `write_file`, never shell redirection or heredocs. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
+New base prompts (`prompts/*.txt`) inherit `run_command`/`run_command_bg`'s single-physical-line rule from `_agent.txt` — don't restate or override it. Deliver requested files with `write_file`, never shell redirection or heredocs. Be aware of a known model pitfall: a raw newline character in the JSON `command` string is always rejected as a multi-line command, but a shell escape sequence the model wants to survive into the command (e.g. `\n` for `echo -e`, `\t`) must be double-escaped as `\\n` in JSON so it decodes to the two literal characters `\` and `n`; a single `\n` decodes to an actual `0x0A` newline and gets rejected. Small/local models frequently under-escape this and retry the same broken pattern until they exhaust their consecutive-failure budget instead of recovering.
 
 ## Product Invariants
 

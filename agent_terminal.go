@@ -820,7 +820,7 @@ func readGoalLine(reader *bufio.Reader) (string, error) {
 }
 
 func composeAgentPrompt(basePrompt, goal, history string) (string, error) {
-	data, err := embeddedPrompts.ReadFile("prompts/agent.txt")
+	data, err := embeddedPrompts.ReadFile("prompts/_agent.txt")
 	if err != nil {
 		return "", err
 	}

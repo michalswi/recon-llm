@@ -38,6 +38,8 @@ Check Ollama without starting a session:
 
 On macOS and Linux, interactive prompts support left/right arrows, backspace, and up/down history navigation. History is saved to `~/.recon/history` (up to 500 entries) and shared across runs. Piped or non-interactive input uses plain line reading.
 
+At `[goal]:`, type `Please analyze this: `, paste the block, then press Enter once to send it. In terminals that support bracketed paste (including the VS Code terminal), pasted line breaks appear as `↵` while editing and are sent as newlines in one goal. Pasted control characters other than newline and tab are dropped, and a paste is capped at 256 KiB (a notice is shown when it is truncated). If your terminal does not support bracketed paste, use `/attach PATH` instead.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -84,11 +86,20 @@ Use `/h` for all controls. During a session, `/ollama` checks reachability, `/ol
 
 Think of a skill as a **saved checklist for the agent**. Instead of typing the same instructions every time, save them in a file and reuse them.
 
+For receive-only SDR analysis, pair the [SDR prompt](prompts/sdr_airspace_space.txt) with the [ADS-B snapshot or SBS sample](skills/adsb-aircraft-report/SKILL.md), [decoded drone Remote ID](skills/drone-remote-id-report/SKILL.md), or [satellite orbit](skills/satellite-tle-report/SKILL.md) skill. A packet summary is not a Remote ID decode, and orbital elements do not establish whether a satellite is transmitting.
+
 For example, your goal is: "analyze output from pinging google.com five times and make report". A skill can tell recon which measurements to include and how to explain them.
 
 ### Example: ping a host and report the results
 
-Create the folder `~/.recon/skills/ping-report/`, then save this text as `SKILL.md` inside it:
+A ready-made copy of this example is in the repository at [skills/ping/SKILL.md](skills/ping/SKILL.md). The repository's `skills/` folder is only a staging area for your own skills; recon never reads it. To install a skill, copy it into recon's home directory, naming the destination folder after the skill's `name`:
+
+```sh
+mkdir -p ~/.recon/skills/ping-report
+cp skills/ping/SKILL.md ~/.recon/skills/ping-report/SKILL.md
+```
+
+Or create the folder `~/.recon/skills/ping-report/` yourself and save this text as `SKILL.md` inside it:
 
 ```markdown
 ---
@@ -156,6 +167,8 @@ No rebuild is needed. Edit the file to change the checklist; changes apply to ne
 | Set a role: "You are a network engineer" | Give a checklist: "Run ping and report these measurements" |
 | Built-in defaults, with external/custom overrides | External files; no rebuild needed |
 | One base prompt per run | Multiple skills per run |
+
+**Internal vs. base prompts:** files in [prompts/](prompts) starting with `_` are internal protocol prompts embedded in the binary: `_agent.txt` (the strict JSON action protocol, always added to the base prompt of every agent run) and `_master.txt` (the master orchestrator protocol). They are not offered as base prompts and `SYSTEM_PROMPT` does not replace them. The other `prompts/*.txt` files are selectable role prompts (via `/editsysprompt`, or `SYSTEM_PROMPT` for an external file).
 
 **File rules:** the header accepts only `name` and `description`. Names use lowercase letters, digits, and single separating hyphens (up to 64 characters). Descriptions can be up to 512 bytes; instructions must not be empty.
 
@@ -319,7 +332,7 @@ The master does not push prompts or skills to nodes; each node uses what is conf
 
 | | Master | Nodes |
 |---|---|---|
-| **Base prompt** | `SYSTEM_PROMPT` has no effect on the orchestrator, which always uses the embedded `prompts/master.txt` protocol | Chosen when the node process starts (`SYSTEM_PROMPT`, otherwise the built-in default). The API has no per-run prompt field, so the master cannot change it |
+| **Base prompt** | `SYSTEM_PROMPT` has no effect on the orchestrator, which always uses the embedded `prompts/_master.txt` protocol | Chosen when the node process starts (`SYSTEM_PROMPT`, otherwise the built-in default). The API has no per-run prompt field, so the master cannot change it |
 | **Skills** | Not used by the master itself, and it cannot list or attach a node's skills | Read from the node's own `~/.recon/skills/`. Runs started by the master do not select skills explicitly, so each node's agent may pick one automatically |
 
 Consequences:
