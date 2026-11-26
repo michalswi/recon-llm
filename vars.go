@@ -16,7 +16,7 @@ const (
 //go:embed prompts/*.txt
 var embeddedPrompts embed.FS
 
-var version = "v0.2.0"
+var version = "v0.2.1"
 
 var defaultSystemPrompt = `
 You are a helpful, general-purpose assistant.
