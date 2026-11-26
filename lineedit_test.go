@@ -3,12 +3,91 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 func newTestHistory(entries ...string) *promptHistory {
 	return &promptHistory{entries: append([]string(nil), entries...)}
+}
+
+func TestBracketedPasteIsOneEditableGoal(t *testing.T) {
+	const payload = "first\r\n\r\n\tsecond\rthird"
+	reader := bufio.NewReader(strings.NewReader("analyze: .\x1b[D\x1b[200~" + payload + "\x1b[201~!\rnext\r"))
+	history := newTestHistory()
+	var output bytes.Buffer
+	got, err := runLineEditorWithOutput(reader, "> ", history, &output)
+	want := "analyze: first\n\n\tsecond\nthird!."
+	if err != nil || got != want || len(history.entries) != 1 || history.entries[0] != want {
+		t.Fatalf("goal = %q, history = %q, err = %v", got, history.entries, err)
+	}
+	if !strings.Contains(output.String(), "first↵↵ second↵third") {
+		t.Fatalf("missing paste preview: %q", output.String())
+	}
+	if next, err := runLineEditorWithOutput(reader, "> ", history, &output); err != nil || next != "next" {
+		t.Fatalf("next prompt = %q, err = %v", next, err)
+	}
+}
+
+func TestBracketedPasteDropsControlCharacters(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("\x1b[200~a\x1b[31mb\x00c\x07 zażółć\x1b[201~\r"))
+	got, err := runLineEditorWithOutput(reader, "> ", newTestHistory(), io.Discard)
+	if want := "a[31mbc zażółć"; err != nil || got != want {
+		t.Fatalf("goal = %q, want %q, err = %v", got, want, err)
+	}
+}
+
+func TestOversizedBracketedPasteIsTruncated(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("\x1b[200~" + strings.Repeat("x", maxPasteBytes+100) + "\x1b[201~y\r"))
+	var output bytes.Buffer
+	got, err := runLineEditorWithOutput(reader, "> ", newTestHistory(), &output)
+	if err != nil || len(got) != maxPasteBytes+1 || !strings.HasSuffix(got, "xy") {
+		t.Fatalf("len = %d, err = %v", len(got), err)
+	}
+	if !strings.Contains(output.String(), "paste truncated") {
+		t.Fatal("missing truncation notice")
+	}
+}
+
+func TestLineEditorBackspaceAndArrowsAreRuneAware(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("zażółć\x1b[D\x1b[D\x7f!\r"))
+	got, err := runLineEditorWithOutput(reader, "> ", newTestHistory(), io.Discard)
+	if want := "zaż!łć"; err != nil || got != want {
+		t.Fatalf("goal = %q, want %q, err = %v", got, want, err)
+	}
+}
+
+func TestMultilineHistoryRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history")
+	history := &promptHistory{path: path}
+	multiline := "first\n\tsecond \"quoted\""
+	history.add("single")
+	history.add(multiline)
+	history.add(strings.Repeat("x", maxHistoryEntryBytes+1))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsePromptHistory(string(data)); !slices.Equal(got, []string{"single", multiline}) {
+		t.Fatalf("entries = %q", got)
+	}
+	if got := parsePromptHistory("\x00\"broken\nok\n"); !slices.Equal(got, []string{"\"broken", "ok"}) {
+		t.Fatalf("corrupt entries = %q", got)
+	}
+}
+
+func TestIncompleteBracketedPasteIsNotSubmitted(t *testing.T) {
+	history := newTestHistory()
+	reader := bufio.NewReader(strings.NewReader("analyze \x1b[200~first\nsecond"))
+	got, err := runLineEditorWithOutput(reader, "> ", history, io.Discard)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || got != "" || len(history.entries) != 0 {
+		t.Fatalf("goal = %q, history = %q, err = %v", got, history.entries, err)
+	}
 }
 
 func TestRunLineEditorInsertsCharactersAndSubmitsOnEnter(t *testing.T) {

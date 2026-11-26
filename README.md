@@ -38,6 +38,8 @@ Check Ollama without starting a session:
 
 On macOS and Linux, interactive prompts support left/right arrows, backspace, and up/down history navigation. History is saved to `~/.recon/history` (up to 500 entries) and shared across runs. Piped or non-interactive input uses plain line reading.
 
+At `[goal]:`, type `Please analyze this: `, paste the block, then press Enter once to send it. In terminals that support bracketed paste (including the VS Code terminal), pasted line breaks appear as `↵` while editing and are sent as newlines in one goal. Pasted control characters other than newline and tab are dropped, and a paste is capped at 256 KiB (a notice is shown when it is truncated). If your terminal does not support bracketed paste, use `/attach PATH` instead.
+
 ## Configuration
 
 | Variable | Default | Purpose |
