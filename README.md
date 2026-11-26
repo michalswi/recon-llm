@@ -84,6 +84,8 @@ Use `/h` for all controls. During a session, `/ollama` checks reachability, `/ol
 
 Think of a skill as a **saved checklist for the agent**. Instead of typing the same instructions every time, save them in a file and reuse them.
 
+For receive-only SDR analysis, pair the [SDR prompt](prompts/sdr_airspace_space.txt) with the [ADS-B snapshot or SBS sample](skills/adsb-aircraft-report/SKILL.md), [decoded drone Remote ID](skills/drone-remote-id-report/SKILL.md), or [satellite orbit](skills/satellite-tle-report/SKILL.md) skill. A packet summary is not a Remote ID decode, and orbital elements do not establish whether a satellite is transmitting.
+
 For example, your goal is: "analyze output from pinging google.com five times and make report". A skill can tell recon which measurements to include and how to explain them.
 
 ### Example: ping a host and report the results
